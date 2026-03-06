@@ -1284,6 +1284,15 @@ class ServerArgs:
                     logger.warning(
                         "Force NSA prefill to use sparse MLA (i.e. disable MHA_ONE_SHOT) for GlmMoeDsaForCausalLM on Blackwell."
                     )
+                else:
+                    from sglang.srt.configs.model_config import get_nsa_index_topk
+
+                    envs.SGLANG_NSA_DENSE_ATTN_KV_LEN_THRESHOLD.set(
+                        get_nsa_index_topk(hf_config)
+                    )
+                    logger.warning(
+                        f"Set dense attention kv len threshold to model index_topk={envs.SGLANG_NSA_DENSE_ATTN_KV_LEN_THRESHOLD.get()} for DeepSeek with DSA."
+                    )
                 if self.is_attention_backend_not_set():
                     self.attention_backend = "nsa"
                     logger.info("Use nsa attention backend for DeepSeek with DSA.")
