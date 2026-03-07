@@ -2036,7 +2036,7 @@ class NativeSparseAttnBackend(
             )
 
             # TRTLLM sparse MLA kernel requires MHA as prefill impl
-            if self.nsa_prefill_impl == "trtllm" or self.nsa_decode_impl == "trtllm":
+            if self.nsa_prefill_impl == "trtllm":
                 self.use_mha = True
         else:
             self.use_mha = False  # Decode/verify always use MLA

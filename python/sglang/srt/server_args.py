@@ -1365,6 +1365,10 @@ class ServerArgs:
                         logger.warning(
                             f"Set dense attention kv len threshold to model index_topk={envs.SGLANG_NSA_DENSE_ATTN_KV_LEN_THRESHOLD.get()} for DeepSeek with DSA."
                         )
+                    if self.nsa_prefill_backend == "trtllm":
+                        logger.warning(
+                            "TRTLLM sparse MLA kernel requires MHA as prefill impl, the threshold for dense attention is overridden."
+                        )
                 if self.is_attention_backend_not_set():
                     self.attention_backend = "nsa"
                     logger.info("Use nsa attention backend for DeepSeek with DSA.")
