@@ -1266,9 +1266,6 @@ class NativeSparseAttnBackend(
             else self.nsa_prefill_impl
         )
 
-        if nsa_impl == "trtllm":
-            assert self.use_mha, "TRTLLM dsa kernel requires dense MHA as prefill impl"
-
         if k is not None:
             assert v is not None
             if save_kv_cache:
@@ -2027,7 +2024,7 @@ class NativeSparseAttnBackend(
                     device_sm == 90 or (device_sm >= 100 and device_sm < 110)
                 )  # SM90/SM100 only
                 and max_kv_len
-                <= envs.SGLANG_NSA_DENSE_ATTN_KV_LEN_THRESHOLD.get()  # Short enough for MHA
+                <= envs.SGLANG_NSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD.get()  # Short enough for MHA
                 and forward_batch.token_to_kv_pool.dtype
                 in [torch.bfloat16, torch.float8_e4m3fn]
                 and sum_seq_lens
