@@ -1266,6 +1266,23 @@ class NativeSparseAttnBackend(
             else self.nsa_prefill_impl
         )
 
+        if nsa_impl == "trtllm" and not self.use_mha:
+            return self._forward_trtllm(
+                q,
+                k,
+                v,
+                layer,
+                forward_batch,
+                metadata.nsa_cache_seqlens_int32,
+                save_kv_cache,
+                q_rope,
+                k_rope,
+                topk_indices,
+                cos_sin_cache,
+                is_neox,
+                llama_4_scaling,
+            )
+
         if k is not None:
             assert v is not None
             if save_kv_cache:
