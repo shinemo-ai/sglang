@@ -366,7 +366,10 @@ class ModelRunnerKVCacheMixin:
 
         return MAMBA_CACHE_SIZE_MAX_RUNNING_REQUESTS_RATIO + additional_ratio
 
-    def _init_pools(self: ModelRunner, max_num_reqs: int):
+    def _init_pools(self: ModelRunner):
+        """Initialize the memory pools."""
+        max_num_reqs = self.max_running_requests
+
         # Initialize req_to_token_pool
         if self.req_to_token_pool is None:
             # FIXME(lsyin): this is the temporary fix for the context length issue when using speculative decoding
@@ -753,7 +756,7 @@ class ModelRunnerKVCacheMixin:
             self.full_max_total_num_tokens = config.full_max_total_num_tokens
             self.swa_max_total_num_tokens = config.swa_max_total_num_tokens
 
-        self._init_pools(self.max_running_requests)
+        self._init_pools()
 
     def _resolve_memory_pool_config(
         self: ModelRunner, pre_model_load_memory: int
