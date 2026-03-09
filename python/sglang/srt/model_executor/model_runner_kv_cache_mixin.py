@@ -44,11 +44,14 @@ class MemoryPoolConfig:
     full_max_total_num_tokens: Optional[int] = None
     swa_max_total_num_tokens: Optional[int] = None
 
+    mem_fraction_static: Optional[float] = None
+
     def __post_init__(self):
         if self.max_total_num_tokens <= 0:
-            raise RuntimeError(
-                "Not enough memory. Please try to increase --mem-fraction-static."
-            )
+            msg = "Not enough memory. Please try to increase --mem-fraction-static."
+            if self.mem_fraction_static is not None:
+                msg += f" Current value: mem_fraction_static={self.mem_fraction_static}"
+            raise RuntimeError(msg)
 
 
 # the ratio of mamba cache pool size to max_running_requests
@@ -777,6 +780,7 @@ class ModelRunnerKVCacheMixin:
             max_running_requests=self._resolve_max_num_reqs(token_capacity),
             full_max_total_num_tokens=full_tokens,
             swa_max_total_num_tokens=swa_tokens,
+            mem_fraction_static=self.server_args.mem_fraction_static,
         )
 
     def init_memory_pool(self: ModelRunner, pre_model_load_memory: int):
