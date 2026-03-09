@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -32,6 +33,17 @@ from sglang.srt.utils.common import (
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
+
+
+@dataclass
+class MemoryPoolConfig:
+    """Resolved memory pool config, shared between target and draft workers."""
+
+    max_total_num_tokens: int
+    max_running_requests: int
+    full_max_total_num_tokens: Optional[int] = None
+    swa_max_total_num_tokens: Optional[int] = None
+
 
 # the ratio of mamba cache pool size to max_running_requests
 MAMBA_CACHE_SIZE_MAX_RUNNING_REQUESTS_RATIO = 3
@@ -728,28 +740,29 @@ class ModelRunnerKVCacheMixin:
 
         return max_num_reqs
 
-    def _init_memory_pool_draft(self: ModelRunner):
-        """Draft worker reads all resolved config from target via server_args.
-
-        HACK: spec decode uses server_args as a mutable channel. Target writes
-        first, draft reads later. Should be replaced with an explicit handoff.
-        """
-        self.max_total_num_tokens = self.server_args.draft_runner_cache_size
-        self.max_running_requests = self.server_args.max_num_reqs
+    def _apply_memory_pool_config(self: ModelRunner, config: MemoryPoolConfig):
+        """Apply a resolved MemoryPoolConfig and initialize pools."""
+        self.max_total_num_tokens = config.max_total_num_tokens
+        self.max_running_requests = config.max_running_requests
         if self.is_hybrid_swa:
-            self.full_max_total_num_tokens = (
-                self.server_args._draft_full_max_total_num_tokens
-            )
-            self.swa_max_total_num_tokens = (
-                self.server_args._draft_swa_max_total_num_tokens
+            self.full_max_total_num_tokens = config.full_max_total_num_tokens
+            self.swa_max_total_num_tokens = config.swa_max_total_num_tokens
+
+        if self.max_total_num_tokens <= 0:
+            raise RuntimeError(
+                f"Not enough memory. Please try to increase --mem-fraction-static. "
+                f"Current value: {self.server_args.mem_fraction_static=}"
             )
 
         self._init_pools(self.max_running_requests)
 
     def init_memory_pool(self: ModelRunner, pre_model_load_memory: int):
-        # Draft worker: skip profiling, read everything from target
+        # Draft worker: use the config passed from the target worker
         if not self.spec_algorithm.is_none() and self.is_draft_worker:
-            self._init_memory_pool_draft()
+            assert (
+                self.memory_pool_config is not None
+            ), "Draft worker requires memory_pool_config"
+            self._apply_memory_pool_config(self.memory_pool_config)
             return
 
         # Profile the maximum number of tokens
@@ -762,29 +775,15 @@ class ModelRunnerKVCacheMixin:
         if self.is_hybrid_swa:
             token_capacity = self.set_num_tokens_hybrid_swa(token_capacity)
 
-        # Commit the resolved token capacity & max number of requests
-        self.max_total_num_tokens = token_capacity
-        self.max_running_requests = self._resolve_max_num_reqs(token_capacity)
-
-        # Target worker: store resolved values for draft worker to read later
-        if not self.spec_algorithm.is_none():
-            self.server_args.draft_runner_cache_size = self.max_total_num_tokens
-            self.server_args.max_num_reqs = self.max_running_requests
-            if self.is_hybrid_swa:
-                self.server_args._draft_full_max_total_num_tokens = (
-                    self.full_max_total_num_tokens
-                )
-                self.server_args._draft_swa_max_total_num_tokens = (
-                    self.swa_max_total_num_tokens
-                )
-
-        if self.max_total_num_tokens <= 0:
-            raise RuntimeError(
-                f"Not enough memory. Please try to increase --mem-fraction-static. "
-                f"Current value: {self.server_args.mem_fraction_static=}"
-            )
-
-        self._init_pools(self.max_running_requests)
+        # Build config and apply
+        config = MemoryPoolConfig(
+            max_total_num_tokens=token_capacity,
+            max_running_requests=self._resolve_max_num_reqs(token_capacity),
+            full_max_total_num_tokens=self.full_max_total_num_tokens,
+            swa_max_total_num_tokens=self.swa_max_total_num_tokens,
+        )
+        self.memory_pool_config = config
+        self._apply_memory_pool_config(config)
 
         logger.info(
             f"Memory pool end. "
