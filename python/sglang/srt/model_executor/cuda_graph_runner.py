@@ -682,7 +682,7 @@ class CudaGraphRunner:
             or requested_capture_hidden_mode == self.capture_hidden_mode
         )
         is_tbo_supported = (
-            forward_batch.can_run_tbo if self.enable_two_batch_overlap else True
+            (graph_key in self.graphs) if self.enable_two_batch_overlap else True
         )
 
         is_ngram_supported = (
