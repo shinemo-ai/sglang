@@ -29,7 +29,7 @@ import torch
 import tqdm
 from torch.profiler import ProfilerActivity, profile
 
-from sglang.srt.batch_overlap.two_batch_overlap import TboCudaGraphRunnerPlugin
+from sglang.srt.batch_overlap.two_batch_overlap import TboCudaGraphRunnerPlugin, _tbo_min_batch_size
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH
 from sglang.srt.distributed import get_tensor_model_parallel_rank
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
@@ -612,6 +612,22 @@ class CudaGraphRunner:
     def _cache_loc_dtype(self):
         return torch.int64
 
+    def _need_two_tbo_graphs(self, bs: int):
+        '''
+        Check if we need to capture two TBO cuda graphs for the given batch size.
+        '''
+        return bs < _tbo_min_batch_size
+
+    def _graph_key(
+        self, cuda_graph_bs: int, use_tbo: Optional[bool] = None, stream_idx: Optional[int] = None
+    ):
+        base = f"{stream_idx}_{cuda_graph_bs}" if stream_idx is not None else cuda_graph_bs
+        if not self.enable_two_batch_overlap:
+            return (base, None)
+        if self._need_two_tbo_graphs(cuda_graph_bs):
+            return (base, True if use_tbo else False)
+        return (base, True)
+
     def can_run(self, forward_batch: ForwardBatch):
         if self.require_mlp_tp_gather:
             cuda_graph_bs = (
@@ -624,8 +640,15 @@ class CudaGraphRunner:
             cuda_graph_bs = forward_batch.batch_size
 
         graph_key = cuda_graph_bs
-        if self.enable_pdmux:
-            graph_key = f"{get_current_stream_idx()}_{cuda_graph_bs}"
+        stream_idx = get_current_stream_idx() if self.enable_pdmux else None
+        graph_key = self._graph_key(
+            cuda_graph_bs,
+            use_tbo=forward_batch.can_run_tbo if self.enable_two_batch_overlap else None,
+            stream_idx=stream_idx
+        )
+
+        # if self.enable_pdmux:
+        #     graph_key = f"{get_current_stream_idx()}_{cuda_graph_bs}"
 
         is_bs_supported = (
             graph_key in self.graphs
