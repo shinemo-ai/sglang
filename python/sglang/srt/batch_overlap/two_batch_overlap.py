@@ -41,7 +41,13 @@ from sglang.srt.model_executor.forward_batch_info import (
 )
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.spec_info import SpecInput
-from sglang.srt.utils import BumpAllocator, empty_context, get_bool_env_var, is_hip
+from sglang.srt.utils import (
+    BumpAllocator, 
+    empty_context, 
+    get_bool_env_var,
+    get_int_env_var,
+    is_hip,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.batch_overlap.single_batch_overlap import CombineOverlapArgs
@@ -51,6 +57,7 @@ if TYPE_CHECKING:
 _is_hip = is_hip()
 
 _tbo_debug = get_bool_env_var("SGLANG_TBO_DEBUG")
+_tbo_min_batch_size = get_int_env_var("SGLANG_TBO_MIN_BATCH_SIZE", default=128)
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +92,10 @@ def compute_split_seq_index(
         return _split_extend_seqs(extend_lens)
     elif forward_mode.is_target_verify() or forward_mode.is_decode():
         assert token_num_per_seq is not None
-        return (num_tokens // token_num_per_seq) // 2
+        batch_size = num_tokens // token_num_per_seq
+        if batch_size < _tbo_min_batch_size:
+            return None
+        return batch_size // 2
     elif forward_mode.is_idle() or forward_mode.is_prebuilt():
         assert num_tokens == 0
         return 0
@@ -299,6 +309,8 @@ def compute_split_indices_for_cuda_graph_replay(
         extend_lens=None,
         token_num_per_seq=token_num_per_seq,
     )
+    if tbo_split_seq_index is None:
+        return 0, 0
     tbo_split_token_index = compute_split_token_index(
         split_seq_index=tbo_split_seq_index,
         forward_mode=forward_mode_for_tbo_split,
@@ -328,8 +340,10 @@ class TboCudaGraphRunnerPlugin:
             extend_lens=None,
             token_num_per_seq=token_num_per_seq,
         )
-        # For simplicity, when two_batch_overlap is enabled, we only capture CUDA Graph for tbo=true
-        assert batch.tbo_split_seq_index is not None, f"{num_tokens=}"
+        if batch.tbo_split_seq_index is None:
+            batch.tbo_split_seq_index = 0
+        # # For simplicity, when two_batch_overlap is enabled, we only capture CUDA Graph for tbo=true
+        # assert batch.tbo_split_seq_index is not None, f"{num_tokens=}"
 
         self._tbo_children_num_token_non_padded[...] = (
             TboForwardBatchPreparer.compute_tbo_children_num_token_non_padded(batch)
@@ -398,6 +412,19 @@ class TboDPAttentionPreparer:
                 extend_lens=local_batch.extend_lens,
                 token_num_per_seq=token_num_per_seq,
             )
+
+            if self.local_tbo_split_seq_index is None:
+                if (
+                    local_batch.forward_mode.is_target_verify()
+                    or local_batch.forward_mode.is_decode()
+                ):
+                    batch_size = num_tokens // token_num_per_seq
+                    self.local_small_batch_split_index = batch_size // 2
+                else:
+                    self.local_small_batch_split_index = 0
+            else:
+                self.local_small_batch_split_index = 0
+
             resolved_deepep_mode = deepep_mode.resolve(local_batch.is_extend_in_batch)
             local_can_run_tbo = (self.local_tbo_split_seq_index is not None) and not (
                 (
@@ -409,6 +436,7 @@ class TboDPAttentionPreparer:
             )
         else:
             self.local_tbo_split_seq_index = 0
+            self.local_small_batch_split_index = 0
             local_can_run_tbo = True
 
         local_forward_mode = self._compute_local_forward_mode(local_batch)
@@ -418,7 +446,7 @@ class TboDPAttentionPreparer:
     def compute_output(self, partial_global_info):
         # Perform only one Device-to-Host (D2H) memory copy
         cpu_data = partial_global_info[:, :2].cpu()
-        local_can_run_tbo_aggregated = min(cpu_data[:, 0].tolist())
+        local_can_run_tbo_aggregated = max(cpu_data[:, 0].tolist())
         forward_modes = cpu_data[:, 1].tolist()
 
         global_forward_mode, forward_mode_agree = self._compute_global_forward_mode(
@@ -431,7 +459,16 @@ class TboDPAttentionPreparer:
             and forward_mode_agree
         )
 
-        tbo_split_seq_index = self.local_tbo_split_seq_index if can_run_tbo else None
+        if can_run_tbo:
+            tbo_split_seq_index = (
+                self.local_tbo_split_seq_index
+                if self.local_tbo_split_seq_index is not None
+                else getattr(self, "local_small_batch_split_index", 0)
+            )
+        else:
+            tbo_split_seq_index = None
+
+        # tbo_split_seq_index = self.local_tbo_split_seq_index if can_run_tbo else None
         global_forward_mode = global_forward_mode if can_run_tbo else None
         return tbo_split_seq_index, global_forward_mode
 
@@ -853,6 +890,12 @@ def _model_forward_tbo(
     input_data_scatter_mode: ScatterMode,
     layer_input_scatter_mode: ScatterMode,
 ):
+    forward_batch = inputs["forward_batch"]
+    if forward_batch.tbo_children is not None and any(
+        c.batch_size == 0 for c in forward_batch.tbo_children
+    ):
+        return _model_forward_non_tbo(inputs, operations_strategy)
+
     inputs_arr = _model_forward_tbo_split_inputs(
         **inputs,
         input_data_scatter_mode=input_data_scatter_mode,
