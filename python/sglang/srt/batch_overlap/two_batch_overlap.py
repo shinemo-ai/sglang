@@ -891,9 +891,7 @@ def _model_forward_tbo(
     layer_input_scatter_mode: ScatterMode,
 ):
     forward_batch = inputs["forward_batch"]
-    if forward_batch.tbo_children is not None and any(
-        c.batch_size == 0 for c in forward_batch.tbo_children
-    ):
+    if forward_batch.tbo_children is None:
         return _model_forward_non_tbo(inputs, operations_strategy)
 
     inputs_arr = _model_forward_tbo_split_inputs(
