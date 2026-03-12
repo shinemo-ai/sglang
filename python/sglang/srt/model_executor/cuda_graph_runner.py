@@ -760,6 +760,9 @@ class CudaGraphRunner:
                     num_tokens=bs * self.num_tokens_per_bs,
                     tp_group=self.model_runner.tp_group,
                 ) as forward:
+                    if self.enable_two_batch_overlap and self._need_two_tbo_graphs(bs):
+                        for use_tbo in [True, False]:
+                            self.capture_one_batch_size()
                     (
                         graph,
                         output_buffers,
@@ -807,7 +810,7 @@ class CudaGraphRunner:
         return torch.cuda.CUDAGraph()
 
     def capture_one_batch_size(
-        self, bs: int, forward: Callable, stream_idx: Optional[int] = None
+        self, bs: int, forward: Callable, stream_idx: Optional[int] = None, use_tbo: bool = True
     ):
         buffers: DecodeInputBuffers = self.buffers
         graph = self._create_device_graph()
@@ -933,7 +936,11 @@ class CudaGraphRunner:
             global_forward_mode=self.capture_forward_mode,
             lora_ids=lora_ids,
         )
-        self.tbo_plugin.capture_one_batch_size(forward_batch, num_tokens=num_tokens)
+        if use_tbo:
+            self.tbo_plugin.capture_one_batch_size(forward_batch, num_tokens=num_tokens)
+        else:
+            forward_batch.tbo_split_seq_index = None
+            forward_batch.tbo_children = None
 
         if lora_ids is not None:
             self.model_runner.lora_manager.prepare_lora_batch(forward_batch)
@@ -1065,7 +1072,7 @@ class CudaGraphRunner:
             ),
             pp_proxy_tensors=pp_proxy_tensors,
         )
-        if self.enable_two_batch_overlap:
+        if self.enable_two_batch_overlap and forward_batch.can_run_tbo:
             self.tbo_plugin.replay_prepare(
                 forward_mode=self.capture_forward_mode,
                 bs=bs,
@@ -1095,6 +1102,9 @@ class CudaGraphRunner:
         self.raw_bs = raw_bs
         self.raw_num_token = raw_num_token
         self.bs = bs
+        self.use_tbo = (
+            forward_batch.can_run_tbo if self.enable_two_batch_overlap else None
+        )
 
     def replay(
         self,
@@ -1112,10 +1122,12 @@ class CudaGraphRunner:
             self.buffers.positions[: self.raw_num_token].copy_(forward_batch.positions)
 
         # Replay
-        if self.enable_pdmux:
-            graph_key = f"{get_current_stream_idx()}_{self.bs}"
-        else:
-            graph_key = self.bs
+        # if self.enable_pdmux:
+        #     graph_key = f"{get_current_stream_idx()}_{self.bs}"
+        # else:
+        #     graph_key = self.bs
+        stream_idx = get_current_stream_idx() if self.enable_pdmux else None
+        graph_key = self._graph_key(self.bs, self.use_tbo, stream_idx)
         self.graphs[graph_key].replay()
         output = self.output_buffers[graph_key]
 
