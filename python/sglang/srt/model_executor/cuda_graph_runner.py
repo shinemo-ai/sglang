@@ -762,15 +762,27 @@ class CudaGraphRunner:
                 ) as forward:
                     if self.enable_two_batch_overlap and self._need_two_tbo_graphs(bs):
                         for use_tbo in [True, False]:
-                            self.capture_one_batch_size()
-                    (
-                        graph,
-                        output_buffers,
-                    ) = self.capture_one_batch_size(bs, forward, stream_idx)
-                    # For pd_multiplexing, we need to save the graph and output buffers
-                    key = bs if stream_idx is None else f"{stream_idx}_{bs}"
-                    self.graphs[key] = graph
-                    self.output_buffers[key] = output_buffers
+                            if get_bool_env_var("SGLANG_TBO_DEBUG"):
+                                logger.info(
+                                    f"Capturing batches (bs={bs} use_tbo={use_tbo})"
+                                )
+                            graph, output_buffers = self.capture_one_batch_size(
+                                bs, forward, stream_idx, use_tbo=use_tbo
+                            )
+                            key = self._graph_key(bs, use_tbo, stream_idx)
+                            self.graphs[key] = graph
+                            self.output_buffers[key] = output_buffers
+                    else:
+                        graph, output_buffers = self.capture_one_batch_size(
+                            bs, forward, stream_idx, use_tbo=True
+                        )
+                        key = self._graph_key(
+                            bs, 
+                            True if self.enable_two_batch_overlap else None,
+                            stream_idx
+                        )
+                        self.graphs[key] = graph
+                        self.output_buffers[key] = output_buffers
 
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
