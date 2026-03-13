@@ -170,8 +170,10 @@ class TboAttnBackend(AttentionBackend):
         )
 
         child_left, child_right = self.children
-        getattr(child_left, fn_name)(**args_left)
-        getattr(child_right, fn_name)(**args_right)
+        if bs_child_left > 0:
+            getattr(child_left, fn_name)(**args_left)
+        if bs_child_right > 0:
+            getattr(child_right, fn_name)(**args_right)
 
     def get_cuda_graph_seq_len_fill_value(self):
         ans = self.primary.get_cuda_graph_seq_len_fill_value()
