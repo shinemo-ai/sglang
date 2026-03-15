@@ -639,14 +639,10 @@ class CudaGraphRunner:
         else:
             cuda_graph_bs = forward_batch.batch_size
 
+        graph_key = cuda_graph_bs
         stream_idx = get_current_stream_idx() if self.enable_pdmux else None
-        if self.disable_padding:
-            bs_for_key = cuda_graph_bs
-        else:
-            index = bisect.bisect_left(self.capture_bs, cuda_graph_bs)
-            bs_for_key = self.capture_bs[index]
         graph_key = self._graph_key(
-            bs_for_key,
+            cuda_graph_bs,
             use_tbo=forward_batch.can_run_tbo if self.enable_two_batch_overlap else None,
             stream_idx=stream_idx
         )

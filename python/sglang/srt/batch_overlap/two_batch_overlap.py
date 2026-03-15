@@ -677,9 +677,15 @@ class TboForwardBatchPreparer:
             output_dict[key] = old_value[start_token_index:end_token_index]
 
         attention_tp_size = get_attention_tp_size()
+        # output_dict["tbo_padded_len"] = (
+        #     (end_token_index - start_token_index - 1) // attention_tp_size + 1
+        # ) * attention_tp_size
         output_dict["tbo_padded_len"] = (
-            (end_token_index - start_token_index - 1) // attention_tp_size + 1
-        ) * attention_tp_size
+            max(
+                0, 
+                (end_token_index - start_token_index - 1) // attention_tp_size + 1
+            ) * attention_tp_size
+        )
 
         for key in [
             "req_pool_indices",
@@ -891,7 +897,9 @@ def _model_forward_tbo(
     layer_input_scatter_mode: ScatterMode,
 ):
     forward_batch = inputs["forward_batch"]
-    if forward_batch.tbo_children is None:
+    if forward_batch.tbo_children is not None and any(
+        c.batch_size == 0 for c in forward_batch.tbo_children
+    ):
         return _model_forward_non_tbo(inputs, operations_strategy)
 
     inputs_arr = _model_forward_tbo_split_inputs(
