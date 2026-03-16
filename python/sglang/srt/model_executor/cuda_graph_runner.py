@@ -681,9 +681,20 @@ class CudaGraphRunner:
             requested_capture_hidden_mode == CaptureHiddenMode.NULL
             or requested_capture_hidden_mode == self.capture_hidden_mode
         )
-        is_tbo_supported = (
-            (graph_key in self.graphs) if self.enable_two_batch_overlap else True
-        )
+        if not self.enable_two_batch_overlap:
+            is_tbo_supported = True
+        elif graph_key in self.graphs:
+            is_tbo_supported = True
+        elif self.disable_padding:
+            is_tbo_supported = False
+        else:
+            use_tbo = forward_batch.can_run_tbo if self.enable_two_batch_overlap else None
+            index = bisect.bisect_left(self.capture_bs, cuda_graph_bs)
+            padded_bs = self.capture_bs[index]
+            padded_graph_key = self._graph_key(
+                padded_bs, use_tbo=use_tbo, stream_idx=stream_idx
+            )
+            is_tbo_supported = padded_graph_key in self.graphs
 
         is_ngram_supported = (
             (
