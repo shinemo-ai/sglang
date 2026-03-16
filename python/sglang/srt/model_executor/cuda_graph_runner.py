@@ -616,7 +616,7 @@ class CudaGraphRunner:
         '''
         Check if we need to capture two TBO cuda graphs for the given batch size.
         '''
-        return bs < _tbo_min_batch_size
+        return bs <= _tbo_min_batch_size
 
     def _graph_key(
         self, cuda_graph_bs: int, use_tbo: Optional[bool] = None, stream_idx: Optional[int] = None

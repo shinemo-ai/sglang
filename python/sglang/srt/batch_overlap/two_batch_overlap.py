@@ -93,7 +93,7 @@ def compute_split_seq_index(
     elif forward_mode.is_target_verify() or forward_mode.is_decode():
         assert token_num_per_seq is not None
         batch_size = num_tokens // token_num_per_seq
-        if batch_size < _tbo_min_batch_size:
+        if batch_size <= _tbo_min_batch_size:
             return None
         return batch_size // 2
     elif forward_mode.is_idle() or forward_mode.is_prebuilt():
