@@ -971,7 +971,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
 
     @property
     def can_run_tbo(self):
-        return self.tbo_split_seq_index is not None
+        return self.tbo_split_seq_index is not None and self.tbo_split_seq_index != 0
 
 
 def enable_num_token_non_padded(server_args):
