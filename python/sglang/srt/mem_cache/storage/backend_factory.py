@@ -169,8 +169,17 @@ class StorageBackendFactory:
             backend = backend_class(storage_config, mem_pool_host)
             return backend
         elif backend_name == "hf3fs":
+            from sglang.srt.mem_cache.memory_pool_host import NSATokenToKVPoolHost
+
+            if isinstance(mem_pool_host, NSATokenToKVPoolHost):
+                bytes_per_page = (
+                    mem_pool_host.kv_cache_dim
+                    * mem_pool_host.dtype.itemsize
+                    * mem_pool_host.layer_num
+                    * mem_pool_host.page_size
+                )
             # Calculate bytes_per_page based on memory pool layout
-            if mem_pool_host.layout in ["page_first", "page_first_direct"]:
+            elif mem_pool_host.layout in ["page_first", "page_first_direct"]:
                 bytes_per_page = (
                     mem_pool_host.get_ksize_per_token() * mem_pool_host.page_size
                 )
