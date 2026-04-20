@@ -2119,8 +2119,39 @@ class Scheduler(
         for req in self.waiting_queue:
             entry_time = req.time_stats.wait_queue_entry_time
             if 0 < entry_time < deadline:
+                deleted_reqs.add(req.rid)
+                
+        tp_cache_group=(
+            self.attn_tp_cpu_group
+            if self.server_args.enable_dp_attention
+            else self.tp_cpu_group
+        )
+                
+        # because clock granularity in different ranks is not enough, we need to use all_reduce to get the timeout status from all ranks
+        # to make sure all ranks can enter release_aborted_request which has a collective operation in case of communication deadlock
+        if self.enable_hicache_storage and torch.distributed.get_world_size(tp_cache_group) > 1:
+            if self.waiting_queue:
+                timeout_flags = torch.tensor(
+                    [1 if req.rid in deleted_reqs else 0 for req in self.waiting_queue],
+                    dtype=torch.int,
+                )
+                torch.distributed.all_reduce(
+                    timeout_flags,
+                    op=torch.distributed.ReduceOp.MAX,
+                    group=tp_cache_group,
+                )
+                deleted_reqs = {
+                    req.rid
+                    for req, flag in zip(self.waiting_queue, timeout_flags.tolist())
+                    if flag > 0
+                }
+        for req in self.waiting_queue:
+            if req.rid in deleted_reqs:
                 if self.enable_hicache_storage:
-                    # Release prefetch events associated with the request
+                    # Release prefetch events associated with the request.
+                    # All TP workers call this for the same set of requests
+                    # (ensured by the all_reduce above), so the internal
+                    # collectives inside release_aborted_request are safe.
                     self.tree_cache.release_aborted_request(req.rid)
                 self.send_to_tokenizer.send_output(
                     AbortReq(
@@ -2133,11 +2164,11 @@ class Scheduler(
                     ),
                     req,
                 )
-                deleted_reqs.add(req)
+
 
         if deleted_reqs:
             self.waiting_queue = [
-                req for req in self.waiting_queue if req not in deleted_reqs
+                req for req in self.waiting_queue if req.rid not in deleted_reqs
             ]
 
     def handle_embedding_request(

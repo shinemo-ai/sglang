@@ -880,6 +880,7 @@ class HiCacheController:
                 operation.completed_tokens
                 != prev_completed_tokens + len(batch_hashes) * self.page_size
             ):
+                logger.warning(f"Prefetch operation {operation.request_id} terminated by controller, cause by mismatch of completed tokens: {operation.completed_tokens} != {prev_completed_tokens + len(batch_hashes) * self.page_size}")
                 operation.mark_terminate()
                 break  # Some operations fail or operation terminated by controller
 
