@@ -44,6 +44,8 @@ pub type TenantId = Arc<str>;
 pub struct PrefixMatchResult {
     /// The tenant that owns the matched prefix (zero-copy)
     pub tenant: TenantId,
+    /// Every worker URL registered at the matched radix tree node
+    pub all_tenants_at_node: Vec<TenantId>,
     /// Number of characters matched
     pub matched_char_count: usize,
     /// Total number of characters in the input text
@@ -611,8 +613,15 @@ impl Tree {
         // needing to track remaining precisely through the traversal.
         let input_char_count = text.chars().count();
 
+        let all_tenants_at_node = curr
+            .tenant_last_access_time
+            .iter()
+            .map(|kv| Arc::clone(kv.key()))
+            .collect();
+
         PrefixMatchResult {
             tenant,
+            all_tenants_at_node,
             matched_char_count: matched_chars,
             input_char_count,
         }
@@ -2126,9 +2135,17 @@ mod tests {
         // Insert for tenant2 on same path
         tree.insert("hello", "tenant2");
 
-        // Match again - should still work (cache or iteration)
-        let (matched, _) = tree.prefix_match("hello");
+        let r = tree.prefix_match_with_counts("hello");
+        assert_eq!(r.matched_char_count, 5);
+        assert_eq!(r.all_tenants_at_node.len(), 2);
+        assert!(r.all_tenants_at_node.iter().any(|t| t.as_ref() == "tenant1"));
+        assert!(r.all_tenants_at_node.iter().any(|t| t.as_ref() == "tenant2"));
+
+        // Legacy `prefix_match` still exposes a single `tenant` via `last_tenant` (set on
+        // leaf creation); cache-aware routing uses `all_tenants_at_node` + worker load.
+        let (matched, tenant) = tree.prefix_match("hello");
         assert_eq!(matched, "hello");
+        assert_eq!(tenant, "tenant1");
     }
 
     #[test]

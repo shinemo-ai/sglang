@@ -59,7 +59,7 @@
     during the next eviction cycle.
 */
 
-use std::sync::Arc;
+use std::{slice, sync::Arc};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -405,12 +405,22 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
 
             // Select worker without String allocation
             let selected_idx = if match_rate > self.config.cache_threshold {
-                // Cache hit path: find worker by URL (compare &str directly, no allocation)
-                let tenant_url: &str = &result.tenant;
-                workers
+                // Among workers that appear at this radix tree node, pick the
+                // healthy one with the minimum load
+                let candidates = if result.all_tenants_at_node.is_empty() {
+                    slice::from_ref(&result.tenant)
+                } else {
+                    result.all_tenants_at_node.as_slice()
+                };
+                healthy_indices
                     .iter()
-                    .position(|w| w.url() == tenant_url)
-                    .filter(|&idx| workers[idx].is_healthy())
+                    .filter(|&&idx| {
+                        candidates
+                            .iter()
+                            .any(|t| t.as_ref() == workers[idx].url())
+                    })
+                    .min_by_key(|&&idx| (workers[idx].load(), idx))
+                    .copied()
             } else {
                 // Low cache match: use worker with minimum load
                 healthy_indices
@@ -575,6 +585,75 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(idx1, idx3);
+    }
+
+    /// When multiple workers share the same radix leaf, the cache-hit path should pick
+    /// the healthy worker with the smallest `load()`, not stick to an arbitrary tenant.
+    #[tokio::test]
+    async fn test_cache_aware_hit_path_min_load_among_prefix_candidates() {
+        let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+            cache_threshold: 0.3,
+            balance_abs_threshold: 5,
+            balance_rel_threshold: 2.0,
+            eviction_interval_secs: 0,
+            max_tree_size: 10000,
+        });
+
+        let w0 = BasicWorkerBuilder::new("http://w1:8000")
+            .worker_type(WorkerType::Regular)
+            .api_key("k")
+            .build();
+        let w1 = BasicWorkerBuilder::new("http://w2:8000")
+            .worker_type(WorkerType::Regular)
+            .api_key("k")
+            .build();
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(w0), Arc::new(w1)];
+        policy.init_workers(&workers);
+
+        // Low match at root → shortest queue pins `shared_prefix` to one worker first
+        let _ = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    request_text: Some("shared_prefix"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Imbalanced → second insert for the same text on the other worker (see select_worker_min_load)
+        for _ in 0..20 {
+            workers[0].increment_load();
+        }
+        let _ = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    request_text: Some("shared_prefix"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        workers[0].reset_load();
+        workers[1].reset_load();
+        for _ in 0..3 {
+            workers[0].increment_load();
+        }
+
+        let pick = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    request_text: Some("shared_prefix"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(pick, 1);
     }
 
     #[tokio::test]
