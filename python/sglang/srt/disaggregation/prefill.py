@@ -736,6 +736,30 @@ class SchedulerDisaggregationPrefillMixin:
             if self.last_batch.batch_size() < last_bs:
                 self.running_batch.batch_is_full = False
 
+    def _disagg_ensure_pinned_staging(self: Scheduler, numel: int, dtype: torch.dtype):
+        """
+        Grow-on-demand pinned CPU buffer for CUDA -> host D2H staging.
+        """
+        buf = getattr(self, "_disagg_kv_send_pinned_staging", None)
+        if buf is None or buf.numel() < numel or buf.dtype != dtype:
+            use_pin = bool(torch.cuda.is_available())
+            self._disagg_kv_send_pinned_staging = torch.empty(
+                numel, dtype=dtype, device="cpu", pin_memory=use_pin
+            )
+        return self._disagg_kv_send_pinned_staging[:numel]
+
+    def _disagg_gpu_tensor_to_numpy(self: Scheduler, indices_tensor: torch.Tensor) -> np.ndarray:
+        """
+        Copy a 1-D tensor to NumPy via pinned CPU staging when the source is on CUDA.
+        """
+        indices_flat = indices_tensor.reshape(-1).contiguous()
+        if not indices_flat.is_cuda:
+            return indices_flat.detach().cpu().numpy()
+        staging = self._disagg_ensure_pinned_staging(indices_flat.numel(), indices_flat.dtype)
+        staging.copy_(indices_flat, non_blocking=True)
+        torch.cuda.synchronize(indices_flat.device)
+        return staging.numpy()
+
     def send_kv_chunk(
         self: Scheduler,
         req: Req,
@@ -766,11 +790,10 @@ class SchedulerDisaggregationPrefillMixin:
             )
             return
 
-        kv_indices = (
+        kv_indices = self._disagg_gpu_tensor_to_numpy(
             self.req_to_token_pool.req_to_token[req.req_pool_idx, start_idx:end_idx]
-            .cpu()
-            .numpy()
         )
+        
         state_indices = None
         if last_chunk:
             self.disagg_metadata_buffers.set_buf(req)
@@ -781,11 +804,11 @@ class SchedulerDisaggregationPrefillMixin:
             ):
                 # Mamba hybrid model: send single mamba state index
                 state_indices = [
-                    self.req_to_token_pool.req_index_to_mamba_index_mapping[
-                        req.req_pool_idx
-                    ]
-                    .cpu()
-                    .numpy()
+                    self._disagg_gpu_tensor_to_numpy(
+                        self.req_to_token_pool.req_index_to_mamba_index_mapping[
+                            req.req_pool_idx
+                        ]
+                    )
                 ]
             elif isinstance(
                 self.token_to_kv_pool_allocator.get_kvcache(), BaseSWAKVPool
@@ -806,7 +829,7 @@ class SchedulerDisaggregationPrefillMixin:
                         window_kv_indices_full
                     )
                 )
-                state_indices = window_kv_indices_swa.cpu().numpy()
+                state_indices = self._disagg_gpu_tensor_to_numpy(window_kv_indices_swa)
                 state_indices = kv_to_page_indices(state_indices, page_size)
             elif isinstance(
                 self.token_to_kv_pool_allocator.get_kvcache(), NSATokenToKVPool
@@ -815,10 +838,19 @@ class SchedulerDisaggregationPrefillMixin:
                 kv_indices_full = self.req_to_token_pool.req_to_token[
                     req.req_pool_idx, :seq_len
                 ]
-                state_indices = kv_indices_full.cpu().numpy()
+                state_indices = self._disagg_gpu_tensor_to_numpy(kv_indices_full)
                 state_indices = kv_to_page_indices(state_indices, page_size)
 
         page_indices = kv_to_page_indices(kv_indices, page_size)
+        if not page_indices.flags.owndata:
+            page_indices = page_indices.copy()
+        if isinstance(state_indices, np.ndarray) and not state_indices.flags.owndata:
+            state_indices = state_indices.copy()
+        elif isinstance(state_indices, list):
+            state_indices = [
+                x.copy() if isinstance(x, np.ndarray) and not x.flags.owndata else x
+                for x in state_indices
+            ]
         if not req.disagg_kv_sender.should_send_kv_chunk(len(page_indices), last_chunk):
             return
         req.disagg_kv_sender.send(page_indices, state_indices)
