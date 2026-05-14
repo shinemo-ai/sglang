@@ -225,19 +225,29 @@ def find_last_user_index(messages: List[Dict[str, Any]]) -> int:
     return last_user_index
 
 
-def attach_task_to_last_user_message(messages: List[Dict[str, Any]], task: str) -> None:
-    """Set `task` on the most recent user/developer message; raise if none exists."""
-    idx = find_last_user_index(messages)
-    if idx == -1:
-        raise ValueError(
-            "`task` requires at least one message with role='user' or 'developer'."
-        )
-    messages[idx]["task"] = task
-
-
 # ============================================================
 # Message Rendering
 # ============================================================
+
+
+def _openai_content_to_plain_str(content: Any) -> str:
+    """
+    OpenAI message fields (`content`, `reasoning_content`, etc.) may be a string or
+    a list of parts like ``[{"type": "text", "text": "..."}]``. Passing a list into
+    ``str.format`` or concatenation yields Python's ``repr`` of the list (the ugly
+    ``[{'type': 'text', ...}]`` seen in some UIs); templates always need a plain str.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n\n".join(
+            str(p.get("text", ""))
+            for p in content
+            if isinstance(p, dict) and p.get("type") == "text"
+        )
+    return str(content)
 
 
 def render_message(
@@ -296,7 +306,9 @@ def render_message(
         prompt += REASONING_EFFORT_MAX
 
     if role == "system":
-        prompt += system_msg_template.format(content=content or "")
+        prompt += system_msg_template.format(
+            content=_openai_content_to_plain_str(content)
+        )
         if tools:
             prompt += "\n\n" + render_tools(tools)
         if response_format:
@@ -308,7 +320,7 @@ def render_message(
         assert content, f"Invalid message for role `{role}`: {msg}"
 
         content_developer = USER_SP_TOKEN
-        content_developer += content
+        content_developer += _openai_content_to_plain_str(content)
 
         if tools:
             content_developer += "\n\n" + render_tools(tools)
@@ -329,7 +341,7 @@ def render_message(
             for block in content_blocks:
                 block_type = block.get("type")
                 if block_type == "text":
-                    parts.append(block.get("text", ""))
+                    parts.append(_openai_content_to_plain_str(block.get("text", "")))
                 elif block_type == "tool_result":
                     tool_content = block.get("content", "")
                     if isinstance(tool_content, list):
@@ -345,11 +357,11 @@ def render_message(
                     parts.append(f"[Unsupported {block_type}]")
             prompt += "\n\n".join(parts)
         else:
-            prompt += content or ""
+            prompt += _openai_content_to_plain_str(content)
 
     elif role == "latest_reminder":
         prompt += LATEST_REMINDER_SP_TOKEN + latest_reminder_msg_template.format(
-            content=content
+            content=_openai_content_to_plain_str(content)
         )
 
     elif role == "tool":
@@ -376,8 +388,8 @@ def render_message(
                 tc_block_name=tool_calls_block_name,
             )
 
-        summary_content = content or ""
-        rc = reasoning_content or ""
+        summary_content = _openai_content_to_plain_str(content)
+        rc = _openai_content_to_plain_str(reasoning_content)
 
         # Check if previous message has a task - if so, this is a task output (no thinking)
         prev_has_task = index - 1 >= 0 and messages[index - 1].get("task") is not None
@@ -496,7 +508,8 @@ def merge_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     }
                 )
         elif role == "user":
-            text_block = {"type": "text", "text": msg.get("content", "")}
+            flat = _openai_content_to_plain_str(msg.get("content", ""))
+            text_block = {"type": "text", "text": flat}
             if (
                 merged
                 and merged[-1].get("role") == "user"
@@ -507,7 +520,7 @@ def merge_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             else:
                 new_msg = {
                     "role": "user",
-                    "content": msg.get("content", ""),
+                    "content": flat,
                     "content_blocks": [text_block],
                 }
                 # Preserve extra fields (task, wo_eos, mask, etc.)
@@ -522,7 +535,7 @@ def merge_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def sort_tool_results_by_call_order(
-    messages: List[Dict[str, Any]],
+    messages: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """
     Sort tool_result blocks within user messages by the order of tool_calls
