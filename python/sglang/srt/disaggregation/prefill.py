@@ -25,6 +25,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, List, Optional
 
 import torch
+import numpy as np
 
 from sglang.srt.disaggregation.base import KVPoll
 from sglang.srt.disaggregation.common.conn import CommonKVManager
@@ -842,6 +843,8 @@ class SchedulerDisaggregationPrefillMixin:
                 state_indices = kv_to_page_indices(state_indices, page_size)
 
         page_indices = kv_to_page_indices(kv_indices, page_size)
+
+        # `page_indices` is a view of the original tensor, so we need to copy it to avoid inconsistent
         if not page_indices.flags.owndata:
             page_indices = page_indices.copy()
         if isinstance(state_indices, np.ndarray) and not state_indices.flags.owndata:
@@ -851,6 +854,7 @@ class SchedulerDisaggregationPrefillMixin:
                 x.copy() if isinstance(x, np.ndarray) and not x.flags.owndata else x
                 for x in state_indices
             ]
+            
         if not req.disagg_kv_sender.should_send_kv_chunk(len(page_indices), last_chunk):
             return
         req.disagg_kv_sender.send(page_indices, state_indices)
