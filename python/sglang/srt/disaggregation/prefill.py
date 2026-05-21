@@ -521,14 +521,6 @@ class SchedulerDisaggregationPrefillMixin:
                 req.output_ids.append(next_token_id)
                 maybe_cache_unfinished_req(req, self.tree_cache)
                 self.disagg_prefill_inflight_queue.append(req)
-                if self.spec_algorithm.is_eagle() and batch.spec_info is not None:
-                    req.output_topk_p = batch.spec_info.topk_p[i]
-                    req.output_topk_index = batch.spec_info.topk_index[i]
-                    req.hidden_states_tensor = (
-                        batch.spec_info.hidden_states[i].cpu().clone()
-                    )
-                else:
-                    req.hidden_states_tensor = None
                 if req.return_logprob:
                     assert extend_logprob_start_len_per_req is not None
                     assert extend_input_len_per_req is not None
@@ -544,7 +536,16 @@ class SchedulerDisaggregationPrefillMixin:
                         logits_output,
                     )
                     logprob_pt += num_input_logprobs
-                self.send_kv_chunk(req, last_chunk=True)
+                if self.spec_algorithm.is_eagle() and batch.spec_info is not None:
+                    self.send_kv_chunk(
+                        req,
+                        last_chunk=True,
+                        hidden_states_tensor=batch.spec_info.hidden_states[i],
+                        output_topk_p=batch.spec_info.topk_p[i],
+                        output_topk_index=batch.spec_info.topk_index[i],
+                    )
+                else:
+                    self.send_kv_chunk(req, last_chunk=True)
                 req.time_stats.set_prefill_transfer_queue_entry_time()
 
                 if req.grammar is not None:
@@ -757,6 +758,9 @@ class SchedulerDisaggregationPrefillMixin:
         req: Req,
         last_chunk: bool = False,
         end_idx: Optional[int] = None,
+        hidden_states_tensor: Optional[torch.Tensor] = None,
+        output_topk_p: Optional[torch.Tensor] = None,
+        output_topk_index: Optional[torch.Tensor] = None,
     ) -> None:
         """
         Send a prefilled chunk to the decode server
@@ -789,7 +793,12 @@ class SchedulerDisaggregationPrefillMixin:
         )
         state_indices: Optional[List] = None
         if last_chunk:
-            self.disagg_metadata_buffers.set_buf(req)
+            self.disagg_metadata_buffers.set_buf(
+                req,
+                hidden_states_tensor=hidden_states_tensor,
+                output_topk_p=output_topk_p,
+                output_topk_index=output_topk_index,
+            )
 
             seq_len = len(req.fill_ids)
 

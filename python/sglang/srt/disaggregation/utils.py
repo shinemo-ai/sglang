@@ -255,7 +255,13 @@ class MetadataBuffers:
             self.bootstrap_room[idx].clone(),
         )
 
-    def set_buf(self, req: Req):
+    def set_buf(
+        self, 
+        req: Req,
+        hidden_states_tensor: Optional[torch.Tensor] = None,
+        output_topk_p: Optional[torch.Tensor] = None,
+        output_topk_index: Optional[torch.Tensor] = None,
+        ):
 
         self.output_ids[req.metadata_buffer_index][0] = req.output_ids[0]
         self.cached_tokens[req.metadata_buffer_index][0] = req.cached_tokens
@@ -289,18 +295,18 @@ class MetadataBuffers:
                     device="cpu",
                 )
         # For PD + spec decode
-        if req.hidden_states_tensor is not None:
+        if hidden_states_tensor is not None:
             # speculative_eagle_topk should not be greater than 16 currently
-            topk = req.output_topk_p.size(0)
+            topk = output_topk_p.size(0)
 
             self.output_topk_p[req.metadata_buffer_index, :topk].copy_(
-                req.output_topk_p
+                output_topk_p
             )
             self.output_topk_index[req.metadata_buffer_index, :topk].copy_(
-                req.output_topk_index
+                output_topk_index
             )
             self.output_hidden_states[req.metadata_buffer_index].copy_(
-                req.hidden_states_tensor
+                hidden_states_tensor
             )
         # Store bootstrap_room for validation on decode side
         self.bootstrap_room[req.metadata_buffer_index, 0] = (
