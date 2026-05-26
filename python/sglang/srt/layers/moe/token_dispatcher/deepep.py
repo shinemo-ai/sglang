@@ -41,12 +41,28 @@ _is_npu = is_npu()
 if TYPE_CHECKING:
     from sglang.srt.batch_overlap.single_batch_overlap import CombineOverlapArgs
 
+
+def _is_deepep_v2() -> Optional[bool]:
+    value = os.environ.get("SGLANG_DEEPEP_V2")
+    if value is not None:
+        return value.lower() in ("1", "true", "yes")
+    return False
+
+def _detect_deepep_v2() -> bool:
+    version = getattr(deep_ep_module, "__version__", "")
+    return (_is_deepep_v2() and version.startswith("2.")) or (
+        hasattr(deep_ep_module, "ElasticBuffer") and not version.startswith("1.")
+    )
+
 try:
     if _is_npu and envs.SGLANG_ZBAL_LOCAL_MEM_SIZE.get() > 0:
         from zbal.zbal.deepep_adaptor import Config
         from zbal.zbal_buffer import Buffer
     else:
         from deep_ep import Buffer, Config
+        use_deepep_v2 = _detect_deepep_v2()
+        if use_deepep_v2:
+            from deep_ep import ElasticBuffer, EPHandle
 
     if not _is_npu:
         from sglang.srt.layers.quantization.fp8_kernel import (
@@ -56,6 +72,7 @@ try:
     use_deepep = True
 except ImportError:
     use_deepep = False
+    use_deepep_v2 = False
 
 from enum import Enum, IntEnum, auto
 
@@ -65,6 +82,11 @@ import torch.distributed as dist
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and is_hip()
 
 logger = logging.getLogger(__name__)
+
+if use_deepep and use_deepep_v2 and not _is_npu:
+    logger.info(
+        "DeepEP v2 detected; using v2 normal dispatch/combine."
+    )
 
 
 def _deepep_precompile_tp_barrier() -> None:
@@ -150,6 +172,8 @@ class DeepEPDispatchMode(IntEnum):
 
 class DeepEPBuffer:
     _buffer = None
+    _legacy_buffer = None
+    _elastic_buffer = None
     _dispatch_mode: Optional[DeepEPDispatchMode] = None
     _hidden_size: Optional[int] = None
     _num_max_dispatch_tokens_per_rank: Optional[int] = None
@@ -164,13 +188,25 @@ class DeepEPBuffer:
         deepep_mode: DeepEPMode,
         num_max_dispatch_tokens_per_rank: int = -1,
         num_experts: int = -1,
+        num_topk: int = 0,
+        use_fp8_dispatch: bool = False,
     ):
-        if cls._buffer is not None:
-            return cls._buffer
 
         cls._hidden_size = hidden_size
         cls._num_max_dispatch_tokens_per_rank = num_max_dispatch_tokens_per_rank
         cls._num_experts = num_experts
+
+        if use_deepep_v2:
+
+            if deepep_mode.enable_normal():
+                cls._ensure_elastic_buffer(
+                    group,
+                    hidden_size,
+                    num_max_dispatch_tokens_per_rank,
+                    num_experts,
+                    num_topk,
+                    use_fp8_dispatch,
+                )
 
         num_nvl_bytes, num_rdma_bytes = 0, 0
         if deepep_mode.enable_normal():
@@ -243,6 +279,44 @@ class DeepEPBuffer:
             allow_mnnvl=True,
         )
         return cls._buffer
+
+
+    @classmethod
+    def _ensure_elastic_buffer(
+        cls,
+        group: dist.ProcessGroup,
+        hidden_size: int,
+        num_max_dispatch_tokens_per_rank: int,
+        num_experts: int,
+        num_topk: int = 0,
+        use_fp8_dispatch: bool,
+    ):
+
+        if num_max_dispatch_tokens_per_rank <= 0:
+            num_max_dispatch_tokens_per_rank = (
+                envs.SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK.get()
+            )
+            
+        required_bytes = ElasticBuffer.get_buffer_size_hint(
+            group,
+            num_max_dispatch_tokens_per_rank,
+            hidden_size,
+            num_topk=num_topk,,
+            use_fp8_dispatch=use_fp8_dispatch,
+        )
+
+        if cls._elastic_buffer is not None and cls._elastic_buffer.group == group and cls._elastic_buffer.num_bytes >= required_bytes:
+            return cls._elastic_buffer
+
+        cls._elastic_buffer = ElasticBuffer(
+            group,
+            num_max_tokens_per_rank=num_max_dispatch_tokens_per_rank,
+            hidden=hidden_size,
+            num_topk=num_topk,
+            use_fp8_dispatch=use_fp8_dispatch,
+        )
+        return cls._elastic_buffer
+
 
     @classmethod
     def clean_buffer(cls):
