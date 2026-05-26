@@ -305,7 +305,11 @@ class DeepEPBuffer:
             use_fp8_dispatch=use_fp8_dispatch,
         )
 
-        if cls._elastic_buffer is not None and cls._elastic_buffer.group == group and cls._elastic_buffer.num_bytes >= required_bytes:
+        if (
+            cls._elastic_buffer is not None
+            and cls._elastic_buffer.group == group
+            and cls._elastic_buffer.num_bytes >= required_bytes
+        ):
             return cls._elastic_buffer
 
         cls._elastic_buffer = ElasticBuffer(
