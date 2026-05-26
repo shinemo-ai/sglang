@@ -88,6 +88,13 @@ if use_deepep and use_deepep_v2 and not _is_npu:
         "DeepEP v2 detected; using v2 normal dispatch/combine."
     )
 
+def _deepep_capture_event(async_finish: bool):
+    if not async_finish:
+        return None
+    if use_deepep_v2:
+        return ElasticBuffer.capture()
+    return Buffer.capture()
+
 
 def _deepep_precompile_tp_barrier() -> None:
     # DeepEP's all-to-all operation has a much shorter timeout compared to torch.distributed,
@@ -172,7 +179,6 @@ class DeepEPDispatchMode(IntEnum):
 
 class DeepEPBuffer:
     _buffer = None
-    _legacy_buffer = None
     _elastic_buffer = None
     _dispatch_mode: Optional[DeepEPDispatchMode] = None
     _hidden_size: Optional[int] = None
@@ -197,16 +203,37 @@ class DeepEPBuffer:
         cls._num_experts = num_experts
 
         if use_deepep_v2:
+            cls._build_v2_buffer(
+                group,
+                hidden_size,
+                num_max_dispatch_tokens_per_rank,
+                num_experts,
+                num_topk,
+                use_fp8_dispatch,
+            )
+            return cls._elastic_buffer
+        
+        return cls._get_deepep_buffer_v1(
+            group,
+            hidden_size,
+            param_bytes,
+            deepep_mode,
+            num_max_dispatch_tokens_per_rank,
+            num_experts,
+        )
 
-            if deepep_mode.enable_normal():
-                cls._ensure_elastic_buffer(
-                    group,
-                    hidden_size,
-                    num_max_dispatch_tokens_per_rank,
-                    num_experts,
-                    num_topk,
-                    use_fp8_dispatch,
-                )
+    @classmethod
+    def _get_deepep_buffer_v1(
+        cls,
+        group: dist.ProcessGroup,
+        hidden_size: int,
+        param_bytes: int,
+        deepep_mode: DeepEPMode,
+        num_max_dispatch_tokens_per_rank: int = -1,
+        num_experts: int = -1,
+    ):
+        if cls._buffer is not None:
+            return cls._buffer
 
         num_nvl_bytes, num_rdma_bytes = 0, 0
         if deepep_mode.enable_normal():
@@ -282,7 +309,7 @@ class DeepEPBuffer:
 
 
     @classmethod
-    def _ensure_elastic_buffer(
+    def _build_v2_buffer(
         cls,
         group: dist.ProcessGroup,
         hidden_size: int,
@@ -364,15 +391,20 @@ class DeepEPConfig(BaseDispatcherConfig):
             config_dispatch = config_parsed["normal_dispatch"]
             config_combine = config_parsed["normal_combine"]
 
-            self.normal_dispatch_config = Config(**config_dispatch)
-            self.normal_combine_config = Config(**config_combine)
+            if not use_deepep_v2:
+                self.normal_dispatch_config = Config(**config_dispatch)
+                self.normal_combine_config = Config(**config_combine)
+            else:
+                self.normal_dispatch_config = None
+                self.normal_combine_config = None
 
             assert config_dispatch["num_sms"] == config_combine["num_sms"]
             self.num_sms = config_dispatch["num_sms"]
         else:
             self.normal_dispatch_config = None
             self.normal_combine_config = None
-            self.num_sms = Buffer.num_sms
+            # use `num_sms=0` for auto mode in deepep get_theoretical_num_sms()
+            self.num_sms = 0 if use_deepep_v2 else Buffer.num_sms
 
     @classmethod
     def get_instance(cls):
@@ -556,7 +588,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
                 scale_tma_aligned=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
                 scale_ue8m0=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
             )
-        previous_event = Buffer.capture() if self.async_finish else None
+        previous_event = _deepep_capture_event(self.async_finish)
         return hidden_states, topk_ids, topk_weights, previous_event
 
     def dispatch_b(self, hidden_states, topk_ids, topk_weights, previous_event):
