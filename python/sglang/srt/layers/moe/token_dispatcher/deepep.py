@@ -622,6 +622,41 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         previous_event,
     ):
         buffer = self._get_buffer()
+        expert_alignment = 128 if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM else 1
+        num_sms = DeepEPConfig.get_instance().num_sms
+
+        if use_deepep_v2:
+            _deepep_precompile_tp_barrier()
+            (
+                recv_x,
+                recv_topk_ids,
+                recv_topk_weights,
+                self.handle,
+                event,
+            ) = buffer.dispatch(
+                x,
+                topk_idx=topk_ids,
+                topk_weights=topk_weights,
+                num_experts=self.num_experts,
+                num_max_tokens_per_rank=self.num_max_dispatch_tokens_per_rank,
+                expert_alignment=expert_alignment,
+                num_sms=num_sms,
+                previous_event=previous_event,
+                async_with_compute_stream=self.async_finish,
+                allocate_on_comm_stream=previous_event is not None,
+            )
+            num_recv_tokens_per_expert = self.handle.num_recv_tokens_per_expert_list
+            get_global_expert_distribution_recorder().on_deepep_dispatch_normal(
+                num_recv_tokens_per_expert,
+            )
+            return (
+                recv_x,
+                recv_topk_ids,
+                recv_topk_weights,
+                num_recv_tokens_per_expert,
+                event,
+            )
+
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
@@ -658,7 +693,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             previous_event=previous_event,
             async_finish=self.async_finish,
             allocate_on_comm_stream=(previous_event is not None) and self.async_finish,
-            expert_alignment=128 if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM else 1,
+            expert_alignment=expert_alignment,
             config=DeepEPConfig.get_instance().normal_dispatch_config,
         )
         get_global_expert_distribution_recorder().on_deepep_dispatch_normal(
@@ -688,7 +723,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         else:
             raise NotImplementedError()  # triton runner was supported but it's temporarily disabled
 
-        previous_event = Buffer.capture() if self.async_finish else None
+        previous_event = _deepep_capture_event(self.async_finish)
         return output, previous_event
 
     def combine_b(self, output, previous_event):
@@ -698,9 +733,28 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         self.src2dst = None
         return hidden_states
 
-    def _combine_core(self, x: torch.Tensor, previous_event):
+    def _combine_core(
+        self, 
+        x: torch.Tensor, 
+        previous_event, 
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
         buffer = self._get_buffer()
         _deepep_precompile_tp_barrier()
+        if use_deepep_v2:
+            num_sms = DeepEPConfig.get_instance().num_sms
+            combined_x, _, event = buffer.combine(
+                x,
+                handle=self.handle,
+                topk_weights=topk_weights,
+                num_sms=num_sms,
+                previous_event=previous_event,
+                async_with_compute_stream=self.async_finish,
+                allocate_on_comm_stream=previous_event is not None,
+            )
+            return combined_x, event
+
         combined_x, _, event = buffer.combine(
             x,
             self.handle,
@@ -721,6 +775,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             self.deepep_mode,
             self.num_max_dispatch_tokens_per_rank,
             self.num_experts,
+            use_fp8_dispatch=self.use_fp8,
         )
 
 
@@ -918,6 +973,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             self.deepep_mode,
             self.num_max_dispatch_tokens_per_rank,
             self.num_experts,
+            use_fp8_dispatch=self.use_fp8,
         )
 
 
