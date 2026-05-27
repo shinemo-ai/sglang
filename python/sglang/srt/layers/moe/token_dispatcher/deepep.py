@@ -49,7 +49,7 @@ def _is_deepep_v2() -> Optional[bool]:
     return False
 
 def _detect_deepep_v2() -> bool:
-    version = getattr(deep_ep_module, "__version__", "")
+    version = getattr(deep_ep, "__version__", "")
     return (_is_deepep_v2() and version.startswith("2.")) or (
         hasattr(deep_ep_module, "ElasticBuffer") and not version.startswith("1.")
     )
@@ -59,6 +59,7 @@ try:
         from zbal.zbal.deepep_adaptor import Config
         from zbal.zbal_buffer import Buffer
     else:
+        import deep_ep
         from deep_ep import Buffer, Config
         use_deepep_v2 = _detect_deepep_v2()
         if use_deepep_v2:
