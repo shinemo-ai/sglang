@@ -571,6 +571,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         self.async_finish = async_finish
         self.src2dst = None
         self.quant_config = {}
+        self.deepep_v2_combine_handle = None
 
     def dispatch_a(
         self,
@@ -592,13 +593,22 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         return hidden_states, topk_ids, topk_weights, previous_event
 
     def dispatch_b(self, hidden_states, topk_ids, topk_weights, previous_event):
-        (
-            hidden_states,
-            topk_ids,
-            topk_weights,
-            num_recv_tokens_per_expert,
-            event,
-        ) = self._dispatch_core(hidden_states, topk_ids, topk_weights, previous_event)
+        if use_deepep_v2:
+            (
+                hidden_states,
+                topk_ids,
+                topk_weights,
+                self.deepep_v2_combine_handle,
+                event,
+            ) = self._dispatch_core(hidden_states, topk_ids, topk_weights, previous_event)
+        else:
+            (
+                hidden_states,
+                topk_ids,
+                topk_weights,
+                num_recv_tokens_per_expert,
+                event,
+            ) = self._dispatch_core(hidden_states, topk_ids, topk_weights, previous_event)
         event.current_stream_wait() if self.async_finish else ()
 
         if isinstance(hidden_states, tuple):
@@ -627,6 +637,24 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
 
         if use_deepep_v2:
             _deepep_precompile_tp_barrier()
+            if self.handle is not None:
+                recv_x, _, _, handle, event = buffer.dispatch(
+                    x,
+                    handle=self.handle,
+                    num_sms=_num_comm_sms,
+                    async_with_compute_stream=self.async_finish,
+                )
+                num_recv_tokens_per_expert = self.handle.num_recv_tokens_per_expert_list
+                get_global_expert_distribution_recorder().on_deepep_dispatch_normal(
+                    num_recv_tokens_per_expert,
+                )
+                return (
+                    recv_x, 
+                    self.handle.topk_idx, 
+                    None, 
+                    handle, 
+                    event
+                )
             (
                 recv_x,
                 recv_topk_ids,
@@ -748,7 +776,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             num_sms = DeepEPConfig.get_instance().num_sms
             combined_x, _, event = buffer.combine(
                 x,
-                handle=self.handle,
+                handle=self.deepep_v2_combine_handle,
                 topk_weights=topk_weights,
                 num_sms=num_sms,
                 previous_event=previous_event,
