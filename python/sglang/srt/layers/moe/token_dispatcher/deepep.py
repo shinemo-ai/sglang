@@ -681,7 +681,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
                 recv_x,
                 recv_topk_ids,
                 recv_topk_weights,
-                num_recv_tokens_per_expert,
+                self.handle,
                 event,
             )
 
