@@ -724,10 +724,12 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             raise NotImplementedError()  # triton runner was supported but it's temporarily disabled
 
         previous_event = _deepep_capture_event(self.async_finish)
-        return output, previous_event
+        return output, previous_event, topk_ids, topk_weights
 
-    def combine_b(self, output, previous_event):
-        hidden_states, event = self._combine_core(output, previous_event)
+    def combine_b(self, output, previous_event, topk_ids, topk_weights):
+        hidden_states, event = self._combine_core(
+            output, previous_event, topk_ids, topk_weights
+        )
         event.current_stream_wait() if self.async_finish else ()
         self.handle = None
         self.src2dst = None
