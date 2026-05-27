@@ -601,6 +601,9 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
                 self.deepep_v2_combine_handle,
                 event,
             ) = self._dispatch_core(hidden_states, topk_ids, topk_weights, previous_event)
+            num_recv_tokens_per_expert = (
+                self.deepep_v2_combine_handle.num_recv_tokens_per_expert_list
+            )
         else:
             (
                 hidden_states,
