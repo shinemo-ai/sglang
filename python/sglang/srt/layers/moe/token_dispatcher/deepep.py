@@ -317,7 +317,7 @@ class DeepEPBuffer:
         num_max_dispatch_tokens_per_rank: int,
         num_experts: int,
         num_topk: int = 0,
-        use_fp8_dispatch: bool,
+        use_fp8_dispatch: bool = False,
     ):
 
         if num_max_dispatch_tokens_per_rank <= 0:
@@ -329,7 +329,7 @@ class DeepEPBuffer:
             group,
             num_max_dispatch_tokens_per_rank,
             hidden_size,
-            num_topk=num_topk,,
+            num_topk=num_topk,
             use_fp8_dispatch=use_fp8_dispatch,
         )
 
