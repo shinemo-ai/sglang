@@ -51,7 +51,17 @@ def _is_deepep_v2() -> Optional[bool]:
 def _detect_deepep_v2() -> bool:
     version = getattr(deep_ep, "__version__", "")
     return (_is_deepep_v2() and version.startswith("2.")) or (
-        hasattr(deep_ep_module, "ElasticBuffer") and not version.startswith("1.")
+        hasattr(deep_ep, "ElasticBuffer") and not version.startswith("1.")
+    )
+
+
+def _ep_handle_to_recv_count(handle: "EPHandle", device: torch.device) -> torch.Tensor:
+    """Map DeepEP v2 EPHandle to v1 LL `packed_recv_count` / SGLang `masked_m`."""
+    # Authoritative per-expert recv counts from dispatch (not derivable from gate topk_ids).
+    return torch.tensor(
+        handle.num_recv_tokens_per_expert_list,
+        dtype=torch.int32,
+        device=device,
     )
 
 try:
@@ -645,7 +655,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
                 recv_x, _, _, handle, event = buffer.dispatch(
                     x,
                     handle=self.handle,
-                    num_sms=_num_comm_sms,
+                    num_sms=num_sms,
                     async_with_compute_stream=self.async_finish,
                 )
                 num_recv_tokens_per_expert = self.handle.num_recv_tokens_per_expert_list
@@ -840,6 +850,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         hidden_states, masked_m, event, hook = self._dispatch_core(
             hidden_states,
             topk_ids,
+            topk_weights,
         )
         return (
             hidden_states,
@@ -886,6 +897,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         self,
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
     ):
         input_global_scale = self.quant_config.get("input_global_scale", None)
 
@@ -904,7 +916,38 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         )
 
         buffer = self._get_buffer()
-        _deepep_precompile_tp_barrier()
+        if use_deepep_v2:
+            _deepep_precompile_tp_barrier()
+            num_sms = DeepEPConfig.get_instance().num_sms
+            expert_alignment = 128 if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM else 1
+            async_finish = not self.return_recv_hook
+            if self.handle is not None:
+                recv_hidden, _, _, handle, event = buffer.dispatch(
+                    hidden_states,
+                    handle=self.handle,
+                    num_sms=num_sms,
+                    async_with_compute_stream=async_finish,
+                )
+            else:
+                recv_hidden, _, _, self.handle, event = buffer.dispatch(
+                    hidden_states,
+                    topk_idx=topk_ids,
+                    topk_weights=topk_weights,
+                    num_experts=self.num_experts,
+                    num_max_tokens_per_rank=self.num_max_dispatch_tokens_per_rank,
+                    expert_alignment=expert_alignment,
+                    num_sms=num_sms,
+                    async_with_compute_stream=async_finish,
+                )
+            recv_device = (
+                recv_hidden.device
+                if isinstance(recv_hidden, torch.Tensor)
+                else recv_hidden[0].device
+            )
+            self.packed_recv_count = _ep_handle_to_recv_count(self.handle, recv_device)
+            # v2 has no recv hook; sync via event in dispatch_b.
+            return recv_hidden, self.packed_recv_count, event, None
+
         packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
             buffer.low_latency_dispatch(
                 hidden_states,
