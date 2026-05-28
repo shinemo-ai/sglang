@@ -362,9 +362,10 @@ class DeepEPBuffer:
 
     @classmethod
     def clean_buffer(cls):
-        if not cls._buffer.low_latency_mode:
-            return
+        # DeepEP v2 uses ElasticBuffer and does not have legacy low-latency buffers to clean.
         if use_deepep_v2:
+            return
+        if not cls._buffer.low_latency_mode:
             return
         cls._buffer.clean_low_latency_buffer(
             cls._num_max_dispatch_tokens_per_rank,
@@ -657,16 +658,20 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
                 recv_x, _, _, handle, event = buffer.dispatch(
                     x,
                     handle=self.handle,
-                    num_sms=num_sms,
+                    # Keep the SM count consistent with the cached handle context by default.
+                    # If user forces num_sms via deepep config, allow overriding.
+                    num_sms=self.handle.num_sms if num_sms == 0 else num_sms,
                     async_with_compute_stream=self.async_finish,
                 )
-                num_recv_tokens_per_expert = self.handle.num_recv_tokens_per_expert_list
+                # DeepEP may return a new handle object even in cached mode; keep state consistent.
+                self.handle = handle
+                num_recv_tokens_per_expert = handle.num_recv_tokens_per_expert_list
                 get_global_expert_distribution_recorder().on_deepep_dispatch_normal(
                     num_recv_tokens_per_expert,
                 )
                 return (
                     recv_x, 
-                    self.handle.topk_idx, 
+                    handle.topk_idx, 
                     None, 
                     handle, 
                     event
@@ -928,9 +933,12 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                 recv_hidden, _, _, handle, event = buffer.dispatch(
                     hidden_states,
                     handle=self.handle,
-                    num_sms=num_sms,
+                    # Keep SM count consistent with cached handle context by default.
+                    num_sms=self.handle.num_sms if num_sms == 0 else num_sms,
                     async_with_compute_stream=async_finish,
                 )
+                # DeepEP may return a new handle object even in cached mode; keep state consistent.
+                self.handle = handle
                 self.deepep_v2_combine_handle = handle
             else:
                 recv_hidden, _, _, self.handle, event = buffer.dispatch(
