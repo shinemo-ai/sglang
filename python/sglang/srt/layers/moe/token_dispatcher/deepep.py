@@ -1057,12 +1057,15 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             _deepep_precompile_tp_barrier()
             if use_deepep_v2:
                 num_sms = DeepEPConfig.get_instance().num_sms
+                previous_event = _deepep_capture_event(self.return_recv_hook)
                 combined_hidden_states, _, event = buffer.combine(
                     hidden_states,
                     handle=self.deepep_v2_combine_handle,
                     topk_weights=topk_weights,
                     num_sms=num_sms,
+                    previous_event=previous_event,
                     async_with_compute_stream=self.return_recv_hook,
+                    allocate_on_comm_stream=previous_event is not None,
                 )
                 self.packed_recv_count = self.handle = None
                 # Emulate v1 return_recv_hook: expose a wait hook.
