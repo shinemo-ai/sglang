@@ -834,6 +834,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         self.return_recv_hook = return_recv_hook
         self.device_module = torch.get_device_module()
         self.quant_config = {}
+        self.deepep_v2_combine_handle = None
 
     def dispatch_a(
         self,
@@ -928,6 +929,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                     num_sms=num_sms,
                     async_with_compute_stream=async_finish,
                 )
+                self.deepep_v2_combine_handle = handle
             else:
                 recv_hidden, _, _, self.handle, event = buffer.dispatch(
                     hidden_states,
@@ -939,6 +941,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                     num_sms=num_sms,
                     async_with_compute_stream=async_finish,
                 )
+                self.deepep_v2_combine_handle = self.handle
             recv_device = (
                 recv_hidden.device
                 if isinstance(recv_hidden, torch.Tensor)
@@ -1028,6 +1031,18 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
 
         with ctx:
             _deepep_precompile_tp_barrier()
+            if use_deepep_v2:
+                num_sms = DeepEPConfig.get_instance().num_sms
+                combined_hidden_states, _, event = buffer.combine(
+                    hidden_states,
+                    handle=self.deepep_v2_combine_handle,
+                    topk_weights=topk_weights,
+                    num_sms=num_sms,
+                    async_with_compute_stream=self.async_finish,
+                )
+                self.packed_recv_count = self.handle = None
+                return combined_hidden_states, event, None
+
             combined_hidden_states, event, hook = buffer.low_latency_combine(
                 x=hidden_states,
                 topk_idx=topk_ids,
