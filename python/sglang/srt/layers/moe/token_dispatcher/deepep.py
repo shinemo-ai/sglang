@@ -880,7 +880,14 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         event,
         hook,
     ):
-        hook() if self.return_recv_hook else event.current_stream_wait()
+        if self.return_recv_hook:
+            # v1 provides a real recv hook; v2 emulates it with an event-wait hook.
+            if hook is not None:
+                hook()
+            else:
+                event.current_stream_wait()
+        else:
+            event.current_stream_wait()
 
         get_global_expert_distribution_recorder().on_deepep_dispatch_low_latency(
             masked_m
@@ -928,7 +935,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             _deepep_precompile_tp_barrier()
             num_sms = DeepEPConfig.get_instance().num_sms
             expert_alignment = 128 if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM else 1
-            async_finish = not self.return_recv_hook
+            async_finish = self.return_recv_hook
             if self.handle is not None:
                 recv_hidden, _, _, handle, event = buffer.dispatch(
                     hidden_states,
@@ -958,8 +965,9 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                 else recv_hidden[0].device
             )
             self.packed_recv_count = _ep_handle_to_recv_count(self.handle, recv_device)
-            # v2 has no recv hook; sync via event in dispatch_b.
-            return recv_hidden, self.packed_recv_count, event, None
+            # DeepEP v2 has no separate recv hook; emulate hook semantics via event wait.
+            hook = event.current_stream_wait if self.return_recv_hook else None
+            return recv_hidden, self.packed_recv_count, event, hook
 
         packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
             buffer.low_latency_dispatch(
@@ -999,7 +1007,13 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         if overlap_args is not None:
             overlap_args.stream.wait_stream(self.device_module.current_stream())
 
-        hook() if self.return_recv_hook else event.current_stream_wait()
+        if self.return_recv_hook:
+            if hook is not None:
+                hook()
+            else:
+                event.current_stream_wait()
+        else:
+            event.current_stream_wait()
 
         if overlap_args is not None:
             self.device_module.current_stream().wait_stream(overlap_args.stream)
@@ -1048,10 +1062,12 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                     handle=self.deepep_v2_combine_handle,
                     topk_weights=topk_weights,
                     num_sms=num_sms,
-                    async_with_compute_stream=self.async_finish,
+                    async_with_compute_stream=self.return_recv_hook,
                 )
                 self.packed_recv_count = self.handle = None
-                return combined_hidden_states, event, None
+                # Emulate v1 return_recv_hook: expose a wait hook.
+                hook = event.current_stream_wait if self.return_recv_hook else None
+                return combined_hidden_states, event, hook
 
             combined_hidden_states, event, hook = buffer.low_latency_combine(
                 x=hidden_states,
