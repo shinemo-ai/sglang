@@ -364,6 +364,8 @@ class DeepEPBuffer:
     def clean_buffer(cls):
         if not cls._buffer.low_latency_mode:
             return
+        if use_deepep_v2:
+            return
         cls._buffer.clean_low_latency_buffer(
             cls._num_max_dispatch_tokens_per_rank,
             cls._hidden_size,
