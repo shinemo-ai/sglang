@@ -2141,14 +2141,18 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         # We should batch all top-k tokens in all positions.
         ret = []
         for i in range(len(token_logprobs_val)):
-            if token_logprobs_val[i]:
-                ret.append(
-                    self.detokenize_logprob_tokens(
-                        token_logprobs_val[i], token_logprobs_idx[i], decode_to_text
-                    )
-                )
-            else:
+            val, idx = token_logprobs_val[i], token_logprobs_idx[i]
+            if isinstance(val, torch.Tensor):
+                if val.numel() == 0:
+                    ret.append(None)
+                    continue
+                val = val.tolist()
+            elif not val:
                 ret.append(None)
+                continue
+            if isinstance(idx, torch.Tensor):
+                idx = idx.tolist()
+            ret.append(self.detokenize_logprob_tokens(val, idx, decode_to_text))
         return ret
 
     def _calculate_spec_decoding_metrics(
