@@ -60,7 +60,9 @@ async def warm_up_compile(
     print("\nGenerate warm up request for compiling DeepGEMM...\n")
     server_args = tokenizer_manager.server_args
     dp_size = server_args.dp_size
-    base_ids = [0, 1, 2, 3]
+    #base_ids = [0, 1, 2, 3]
+    long_len = 8192
+    base_ids = list(range(long_len))
     sampling_params = {
         "temperature": 0.0,
         "max_new_tokens": 8,

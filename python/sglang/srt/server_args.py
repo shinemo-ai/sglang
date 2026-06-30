@@ -3989,6 +3989,7 @@ class ServerArgs:
             )
 
         # Validate IB devices when mooncake backend is used
+        '''
         if (
             self.disaggregation_transfer_backend == "mooncake"
             and self.disaggregation_mode in ("prefill", "decode")
@@ -3996,6 +3997,7 @@ class ServerArgs:
             self.disaggregation_ib_device = self._validate_ib_devices(
                 self.disaggregation_ib_device
             )
+        '''
 
         # Validate model type for encoder disaggregation
         hf_config = self.get_model_config().hf_config

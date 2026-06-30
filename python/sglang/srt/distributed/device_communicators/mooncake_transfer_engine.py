@@ -126,7 +126,8 @@ class MooncakeTransferEngine:
 
         self.initialize(
             hostname=self.hostname,
-            device_name=self.ib_device,
+            #device_name=self.ib_device,
+            device_name=None,
         )
         self.session_id = NetworkAddress(
             self.hostname, self.engine.get_rpc_port()

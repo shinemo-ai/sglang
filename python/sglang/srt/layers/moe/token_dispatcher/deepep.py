@@ -231,7 +231,7 @@ class DeepEPBuffer:
                     f"This may result in highly suboptimal performance. "
                     f"Consider using --deepep-config to change the behavior."
                 )
-
+        allow_mnnvl = get_bool_env_var("SGLANG_DEEPEP_ALLOW_MNNVL", "false")
         cls._buffer = Buffer(
             group,
             num_nvl_bytes,
@@ -239,7 +239,7 @@ class DeepEPBuffer:
             low_latency_mode=deepep_mode.enable_low_latency(),
             num_qps_per_rank=num_qps_per_rank,
             # TODO can be false when unneeded
-            allow_mnnvl=True,
+            allow_mnnvl=allow_mnnvl,
         )
         return cls._buffer
 

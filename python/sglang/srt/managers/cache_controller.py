@@ -1013,7 +1013,10 @@ class HiCacheController:
                 operation = self.prefetch_buffer.get(block=True, timeout=1)
                 if operation is None:
                     continue
+                start = time.perf_counter()
                 self._page_transfer(operation)
+                end = time.perf_counter()
+                logger.info(f"Prefetch operation {operation.request_id} completed in {end - start} seconds.")
                 # operation terminated by controller, release pre-allocated memory
                 self.append_host_mem_release(
                     operation.host_indices[operation.completed_tokens :]

@@ -1348,7 +1348,8 @@ def configure_logger(server_args, prefix: str = ""):
         logging.config.dictConfig(custom_config)
         return
     maybe_ms = ".%(msecs)03d" if envs.SGLANG_LOG_MS.get() else ""
-    format = f"[%(asctime)s{maybe_ms}{prefix}] %(message)s"
+    #format = f"[%(asctime)s{maybe_ms}{prefix}] %(message)s"
+    format = f"%(asctime)s{maybe_ms}|%(threadName)s|%(process)d|%(thread)d|%(levelname)s|%(module)s.%(filename)s:%(lineno)d|{prefix}|%(message)s"
     logging.basicConfig(
         level=getattr(logging, server_args.log_level.upper()),
         format=format,

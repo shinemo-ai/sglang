@@ -36,6 +36,7 @@ from typing import (
     Optional,
     Union,
 )
+import uuid
 
 # Fix a bug of Python threading
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
@@ -533,7 +534,8 @@ async def health_generate(request: Request) -> Response:
         return Response(status_code=200)
 
     sampling_params = {"max_new_tokens": 1, "temperature": 0.0}
-    rid = f"{HEALTH_CHECK_RID_PREFIX}_{time.time()}"
+    #rid = f"{HEALTH_CHECK_RID_PREFIX}_{time.time()}"
+    rid = f"{HEALTH_CHECK_RID_PREFIX}_{uuid.uuid4().hex}"
 
     if _global_state.tokenizer_manager.is_generation:
         gri = GenerateReqInput(

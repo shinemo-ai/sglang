@@ -2684,6 +2684,7 @@ class Scheduler(
                 req.storage_hit_length = self.tree_cache.pop_prefetch_loaded_tokens(
                     req.rid
                 )
+                logger.info(f"prefetch done for request {req.rid}, input {len(req.origin_input_ids)}, storage_hit_ratio={req.storage_hit_length /  len(req.origin_input_ids) if len(req.origin_input_ids) > 0 else 0:.2f}")
 
             req.init_next_round_input(self.tree_cache)
             res = adder.add_one_req(
