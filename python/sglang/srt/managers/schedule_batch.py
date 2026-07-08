@@ -42,6 +42,7 @@ import logging
 import os
 import re
 import threading
+import time
 from array import array
 from concurrent.futures import Future
 from enum import Enum, auto
@@ -1473,6 +1474,8 @@ class Req(ReqDllmMixin):
             return
 
         record = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+            + f".{int((time.time() % 1) * 1000):03d}",
             "rid": self.rid,
             "type": self.time_stats.disagg_mode_str(),
             "input_len": len(self.origin_input_ids),
