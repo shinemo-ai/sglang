@@ -1473,10 +1473,18 @@ class Req(ReqDllmMixin):
         if self.has_log_time_stats:
             return
 
+        # Each TP rank's scheduler logs the same rid independently; tag the
+        # record so rows from different ranks can be told apart / deduplicated.
+        try:
+            tp_rank = get_tensor_model_parallel_rank()
+        except Exception:
+            tp_rank = -1
+
         record = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
             + f".{int((time.time() % 1) * 1000):03d}",
             "rid": self.rid,
+            "tp_rank": tp_rank,
             "type": self.time_stats.disagg_mode_str(),
             "input_len": len(self.origin_input_ids),
             "cached_input_len": self.cached_tokens,
