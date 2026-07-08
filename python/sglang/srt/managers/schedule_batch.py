@@ -37,8 +37,11 @@ ScheduleBatch -> ForwardBatch
 
 import copy
 import dataclasses
+import json
 import logging
+import os
 import re
+import threading
 from array import array
 from concurrent.futures import Future
 from enum import Enum, auto
@@ -125,6 +128,71 @@ INIT_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 MM_PAD_SHIFT_VALUE = 1_000_000
 
 logger = logging.getLogger(__name__)
+
+
+# Dedicated, size-rotated logger for per-request latency JSON lines. Lazily
+# initialized on first use and guarded by a lock because the scheduler may emit
+# stats from more than one thread (e.g. overlap scheduling). One file per
+# process: the filename is prefixed with the pod name and suffixed with the pid
+# so concurrent processes (TP ranks, prefill/decode schedulers) never share a
+# file and never race on rotation.
+_perf_metrics_lock = threading.Lock()
+_perf_metrics_logger = None
+_perf_metrics_disabled = False
+
+
+def _init_perf_metrics_logger():
+    from logging.handlers import RotatingFileHandler
+
+    path = envs.SGLANG_PERF_METRICS_JSONL_PATH.get()
+    dir_name, file_name = os.path.split(path)
+    base, ext = os.path.splitext(file_name)
+    ext = ext or ".jsonl"
+    pod_name = os.environ.get("POD_NAME") or os.environ.get("HOSTNAME") or "unknown"
+    file_name = f"{pod_name}.{base}.{os.getpid()}{ext}"
+    full_path = os.path.join(dir_name, file_name) if dir_name else file_name
+
+    perf_logger = logging.getLogger("sglang.perf_metrics")
+    perf_logger.setLevel(logging.INFO)
+    # Don't bubble these lines up into the root/app log stream.
+    perf_logger.propagate = False
+    handler = RotatingFileHandler(
+        full_path,
+        maxBytes=envs.SGLANG_PERF_METRICS_MAX_BYTES.get(),
+        backupCount=envs.SGLANG_PERF_METRICS_BACKUP_COUNT.get(),
+        encoding="utf-8",
+    )
+    # Emit the raw JSON line only; no timestamp/level prefix.
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    perf_logger.addHandler(handler)
+    return perf_logger
+
+
+def _write_perf_metrics_jsonl(record: dict) -> None:
+    global _perf_metrics_logger, _perf_metrics_disabled
+
+    if _perf_metrics_disabled:
+        return
+
+    with _perf_metrics_lock:
+        if _perf_metrics_disabled:
+            return
+        if _perf_metrics_logger is None:
+            try:
+                _perf_metrics_logger = _init_perf_metrics_logger()
+            except OSError as e:
+                # Don't let a logging path problem take down request handling;
+                # disable and warn once.
+                _perf_metrics_disabled = True
+                logger.warning(
+                    f"Failed to init perf metrics logger: {e}. "
+                    "Per-request latency JSON logging is disabled."
+                )
+                return
+        try:
+            _perf_metrics_logger.info(json.dumps(record, ensure_ascii=False))
+        except (OSError, TypeError) as e:
+            logger.warning(f"Failed to write perf metrics record: {e}")
 
 
 @lru_cache(maxsize=1)
@@ -1404,20 +1472,18 @@ class Req(ReqDllmMixin):
         if self.has_log_time_stats:
             return
 
-        bootstrap_info = (
-            f", bootstrap_room={self.bootstrap_room}"
-            if self.bootstrap_room is not None
-            else ""
-        )
-        prefix = (
-            f"ReqTimeStats("
-            f"rid={self.rid}{bootstrap_info}, "
-            f"input_len={len(self.origin_input_ids)}, "
-            f"cached_input_len={self.cached_tokens}, "
-            f"output_len={len(self.output_ids)}, "
-            f"type={self.time_stats.disagg_mode_str()})"
-        )
-        logger.info(f"{prefix}: {self.time_stats.convert_to_duration()}")
+        record = {
+            "rid": self.rid,
+            "type": self.time_stats.disagg_mode_str(),
+            "input_len": len(self.origin_input_ids),
+            "cached_input_len": self.cached_tokens,
+            "output_len": len(self.output_ids),
+        }
+        if self.bootstrap_room is not None:
+            record["bootstrap_room"] = self.bootstrap_room
+        record.update(self.time_stats.convert_to_duration_dict())
+        _write_perf_metrics_jsonl(record)
+
         self.has_log_time_stats = True
 
     def set_extend_input_len(self, extend_input_len: int):

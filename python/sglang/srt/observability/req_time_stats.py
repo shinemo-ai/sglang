@@ -1105,6 +1105,75 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
         else:
             return "Unknown Time Stats"
 
+    def convert_to_duration_dict(self) -> Dict[str, float]:
+        """Return per-stage latencies (in milliseconds) as a numeric dict.
+
+        Mirrors the stage breakdown produced by ``convert_to_duration`` but
+        emits machine-readable numbers instead of a formatted string, so the
+        result can be serialized to JSON (see perf-metrics.jsonl logging).
+        """
+
+        def ms(start: float, end: float) -> float:
+            return round(self.duration_between(start, end) * 1e3, 3)
+
+        result: Dict[str, float] = {}
+
+        if self.disagg_mode == DisaggregationMode.NULL:
+            result["queue_duration_ms"] = ms(
+                self.wait_queue_entry_time, self.forward_entry_time
+            )
+            result["forward_duration_ms"] = ms(
+                self.forward_entry_time, self.completion_time
+            )
+        elif self.disagg_mode == DisaggregationMode.PREFILL:
+            if (
+                self.bootstrap_done_time > 0
+                and self.prefill_bootstrap_queue_entry_time > 0
+            ):
+                result["bootstrap_duration_ms"] = ms(
+                    self.prefill_bootstrap_queue_entry_time, self.bootstrap_done_time
+                )
+                result["alloc_duration_ms"] = ms(
+                    self.bootstrap_done_time, self.wait_queue_entry_time
+                )
+            else:
+                result["bootstrap_queue_duration_ms"] = ms(
+                    self.prefill_bootstrap_queue_entry_time, self.wait_queue_entry_time
+                )
+            result["queue_duration_ms"] = ms(
+                self.wait_queue_entry_time, self.forward_entry_time
+            )
+            result["forward_duration_ms"] = ms(
+                self.forward_entry_time, self.completion_time
+            )
+            result["transfer_speed_gb_s"] = round(self.transfer_speed_gb_s, 3)
+            result["transfer_total_mb"] = round(self.transfer_total_mb, 3)
+            result["prefill_retry_count"] = self.prefill_retry_count
+        elif self.disagg_mode == DisaggregationMode.DECODE:
+            if self.bootstrap_done_time > 0:
+                result["bootstrap_duration_ms"] = ms(
+                    self.decode_prealloc_queue_entry_time, self.bootstrap_done_time
+                )
+                result["alloc_wait_duration_ms"] = ms(
+                    self.bootstrap_done_time, self.decode_transfer_queue_entry_time
+                )
+            else:
+                result["prealloc_queue_duration_ms"] = ms(
+                    self.decode_prealloc_queue_entry_time,
+                    self.decode_transfer_queue_entry_time,
+                )
+            result["transfer_duration_ms"] = ms(
+                self.decode_transfer_queue_entry_time, self.wait_queue_entry_time
+            )
+            result["queue_duration_ms"] = ms(
+                self.wait_queue_entry_time, self.forward_entry_time
+            )
+            result["forward_duration_ms"] = ms(
+                self.forward_entry_time, self.completion_time
+            )
+
+        return result
+
     def convert_to_output_meta_info(self):
         meta_data = {}
         if self.forward_entry_time > 0.0:

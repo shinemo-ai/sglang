@@ -216,6 +216,16 @@ class Envs:
     SGLANG_LOG_REQUEST_HEADERS = EnvTuple(tuple())
     SGLANG_LOG_SCHEDULER_STATUS_TARGET = EnvStr("")
     SGLANG_LOG_SCHEDULER_STATUS_INTERVAL = EnvFloat(60.0)
+    # Output file for per-request per-stage latency JSON lines, written when
+    # --enable-request-time-stats-logging is set. The actual filename is
+    # "{POD_NAME}.{basename}.{pid}[.jsonl]"; the pod name (POD_NAME env, falling
+    # back to HOSTNAME) and pid keep concurrent processes from sharing a file.
+    # The file is size-rotated (see the two vars below).
+    SGLANG_PERF_METRICS_JSONL_PATH = EnvStr("perf-metrics.jsonl")
+    # Max size per perf-metrics file before rotation (bytes); default 100 MiB.
+    SGLANG_PERF_METRICS_MAX_BYTES = EnvInt(100 * 1024 * 1024)
+    # Number of rotated perf-metrics backups to keep.
+    SGLANG_PERF_METRICS_BACKUP_COUNT = EnvInt(5)
 
     # SGLang CI
     SGLANG_IS_IN_CI = EnvBool(False)
