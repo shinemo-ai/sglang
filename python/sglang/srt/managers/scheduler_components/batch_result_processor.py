@@ -226,9 +226,8 @@ class SchedulerBatchResultProcessor:
                     # req output_ids are set here
                     req.output_ids.append(next_token_id)
 
-                    self._maybe_update_reasoning_tokens(req, next_token_id)
-
                     req.update_finish_state()
+                    self._update_reasoning_tokens_after_finish(req, 1)
                     if req.finished():
                         self._maybe_collect_routed_experts(req)
                         self._maybe_collect_indexer_topk(req)
@@ -662,10 +661,9 @@ class SchedulerBatchResultProcessor:
                 req.output_ids.extend(next_token_id)
                 new_accepted_len = len(next_token_id)
 
-            self._maybe_update_reasoning_tokens(req, next_token_id)
-
             req.time_stats.set_last_decode_finish_time()
             req.update_finish_state(new_accepted_len)
+            self._update_reasoning_tokens_after_finish(req, new_accepted_len)
 
             self._handle_finish_state_updated_req(req, batch, result, i, logits_output)
 
@@ -850,6 +848,18 @@ class SchedulerBatchResultProcessor:
             req.time_stats.set_completion_time()
 
         self._maybe_collect_customized_info(i, req, logits_output)
+
+    def _update_reasoning_tokens_after_finish(
+        self,
+        req: Req,
+        new_accept_len: int,
+    ):
+        """Count reasoning tokens only for output included in completion usage."""
+        prev_len = len(req.output_ids) - new_accept_len
+        effective_end = len(req.output_ids_through_stop)
+        if effective_end > prev_len:
+            effective_tokens = list(req.output_ids[prev_len:effective_end])
+            self._maybe_update_reasoning_tokens(req, effective_tokens)
 
     def _maybe_update_reasoning_tokens(
         self,
