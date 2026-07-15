@@ -2128,7 +2128,7 @@ class Scheduler(
                 self._add_request_to_queue(req)
                 return
 
-        if self._abort_on_prefill_queued_limit(req):
+        if self._abort_on_disagg_queued_limit(req):
             return
 
         added_to_grammar_queue = self.grammar_manager.process_req_with_grammar(req)
@@ -2266,7 +2266,7 @@ class Scheduler(
         req_to_abort.time_stats.trace_ctx.abort(abort_info={"reason": message})
         return req_to_abort.rid == recv_req.rid
 
-    def _abort_on_prefill_queued_limit(self, recv_req: Req) -> bool:
+    def _abort_on_disagg_queued_limit(self, recv_req: Req) -> bool:
         """Reject a prefill request before bootstrap if the waiting queue is full."""
         if self.disaggregation_mode != DisaggregationMode.PREFILL:
             return False
