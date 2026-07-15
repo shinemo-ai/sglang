@@ -86,6 +86,9 @@ class SchedulerBatchResultProcessor:
             self.token_to_kv_pool_allocator.free_group_begin()
         for req in batch.reqs:
             req.time_stats.set_decode_prebuilt_finish_time()
+            # Prefill does not update reasoning_tokens; count the transferred tokens here.
+            if req.output_ids:
+                self._maybe_update_reasoning_tokens(req, list(req.output_ids))
             req.update_finish_state()
             if req.finished():
                 req.time_stats.set_quick_finish_time()
