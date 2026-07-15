@@ -19,6 +19,7 @@ from sglang.srt.utils.host_shared_memory import (
     get_host_shared_memory_manager,
     set_host_shared_memory_manager,
 )
+from sglang.srt.utils.mem_utils import get_cpu_mem_usage_by_gb
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,10 @@ def _hook_module_forward_for_offloader(index, module, offloaders, prefetch_step)
     def _on_forward_end():
         offloaders[(index + prefetch_step) % len(offloaders)].start_onload()
         offloaders[index].offload()
+        logger.debug(
+            f"[offloader] forward end {index=} cuda memory usage:{torch.cuda.memory_allocated()=}, cpu memory usage={get_cpu_mem_usage_by_gb() } GB"
+        )
+  
 
     _hook_module_forward_raw(
         module,
