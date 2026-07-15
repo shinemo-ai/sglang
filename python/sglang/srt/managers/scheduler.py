@@ -2128,6 +2128,9 @@ class Scheduler(
                 self._add_request_to_queue(req)
                 return
 
+        if self._abort_on_prefill_queued_limit(req):
+            return
+
         added_to_grammar_queue = self.grammar_manager.process_req_with_grammar(req)
         if not added_to_grammar_queue:
             self._add_request_to_queue(req)
@@ -2175,8 +2178,6 @@ class Scheduler(
             self.waiting_queue.append(req)
             req.time_stats.set_wait_queue_entry_time()
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
-            if self._abort_on_prefill_queued_limit(req):
-                return
             self._prefetch_kvcache(req)
             self.disagg_prefill_bootstrap_queue.add(
                 req, self.model_config.num_key_value_heads
@@ -2267,11 +2268,22 @@ class Scheduler(
 
     def _abort_on_prefill_queued_limit(self, recv_req: Req) -> bool:
         """Reject a prefill request before bootstrap if the waiting queue is full."""
+        if self.disaggregation_mode != DisaggregationMode.PREFILL:
+            return False
         if (
             self.max_queued_requests is None
             or len(self.waiting_queue) + 1 <= self.max_queued_requests
         ):
             return False
+        logger.info(
+            "Prefill waiting queue is full for request rank=%s rid=%s "
+            "bootstrap_room=%s (%s > %s); rejecting at ingress.",
+            self.ps.tp_rank,
+            recv_req.rid,
+            recv_req.bootstrap_room,
+            len(self.waiting_queue) + 1,
+            self.max_queued_requests,
+        )
         self.handle_bootstrap_failure(recv_req)
         return True
 
