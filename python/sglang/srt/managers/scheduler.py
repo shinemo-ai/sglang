@@ -2175,6 +2175,8 @@ class Scheduler(
             self.waiting_queue.append(req)
             req.time_stats.set_wait_queue_entry_time()
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
+            if self._abort_on_prefill_queued_limit(req):
+                return
             self._prefetch_kvcache(req)
             self.disagg_prefill_bootstrap_queue.add(
                 req, self.model_config.num_key_value_heads
@@ -2262,6 +2264,16 @@ class Scheduler(
         )
         req_to_abort.time_stats.trace_ctx.abort(abort_info={"reason": message})
         return req_to_abort.rid == recv_req.rid
+
+    def _abort_on_prefill_queued_limit(self, recv_req: Req) -> bool:
+        """Reject a prefill request before bootstrap if the waiting queue is full."""
+        if (
+            self.max_queued_requests is None
+            or len(self.waiting_queue) + 1 <= self.max_queued_requests
+        ):
+            return False
+        self.handle_bootstrap_failure(recv_req)
+        return True
 
     def _abort_on_waiting_timeout(self):
         if (timeout_s := envs.SGLANG_REQ_WAITING_TIMEOUT.get()) <= 0:
