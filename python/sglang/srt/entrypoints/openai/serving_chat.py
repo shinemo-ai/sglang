@@ -1226,6 +1226,7 @@ class OpenAIServingChat(OpenAIServingBase):
         video_tokens = {}
 
         stream_started = False
+        aborted_with_error = False
         try:
             include_usage, continuous_usage_stats = should_include_usage(
                 request.stream_options,
@@ -1288,6 +1289,7 @@ class OpenAIServingChat(OpenAIServingBase):
                             code.value,
                         )
                         yield f"data: {error}\n\n"
+                        aborted_with_error = True
                         break
                     finish_reasons[index] = finish_reason
 
@@ -1394,7 +1396,7 @@ class OpenAIServingChat(OpenAIServingBase):
                 yield f"data: {sglext_chunk.model_dump_json()}\n\n"
 
             # Additional usage chunk
-            if include_usage:
+            if include_usage and not aborted_with_error:
                 # Multimodal tokens are per-prompt (input side), so aggregate
                 # once per prompt (first choice), matching prompt/cached semantics.
                 total_image_tokens = sum(

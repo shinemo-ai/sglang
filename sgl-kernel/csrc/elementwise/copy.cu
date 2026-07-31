@@ -54,6 +54,8 @@ void copy_to_gpu_no_ce(const at::Tensor& input, at::Tensor& output) {
     copy_to_gpu_no_ce_impl<64>(input, output);
   } else if (N == 32) {
     copy_to_gpu_no_ce_impl<32>(input, output);
+  } else if (N == 16) {
+    copy_to_gpu_no_ce_impl<16>(input, output);
   } else {
     TORCH_CHECK(false, "unexpected N");
   }

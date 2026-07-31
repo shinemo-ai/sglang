@@ -2497,6 +2497,9 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             self.metrics_collector.observe_time_to_first_token(
                 labels, state.time_stats.get_first_token_latency()
             )
+            logger.info(
+                f"time to first token for request {state.obj.rid} is: {state.time_stats.get_first_token_latency()} seconds"
+            )
         else:
             num_new_tokens = completion_tokens - state.last_completion_tokens
             if num_new_tokens:

@@ -1665,7 +1665,8 @@ class Req(ReqDllmMixin):
 
         try:
             end_pos = token_id.index(think_end_id)
-            self.reasoning_tokens += end_pos + 1
+            # exclude the `think_end` token.
+            self.reasoning_tokens += end_pos
             self._is_reasoning_over = True
         except ValueError:
             self.reasoning_tokens += len(token_id)

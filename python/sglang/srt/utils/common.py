@@ -2101,7 +2101,8 @@ def configure_logger(server_args, prefix: str = ""):
         logging.config.dictConfig(custom_config)
         return
     maybe_ms = ".%(msecs)03d" if envs.SGLANG_LOG_MS.get() else ""
-    format = f"[%(asctime)s{maybe_ms}{prefix}] %(message)s"
+    #format = f"[%(asctime)s{maybe_ms}{prefix}] %(message)s"
+    format = f"%(asctime)s{maybe_ms}|%(threadName)s|%(process)d|%(thread)d|%(levelname)s|%(module)s.%(filename)s:%(lineno)d|{prefix}|%(message)s"
     logging.basicConfig(
         level=getattr(logging, server_args.log_level.upper()),
         format=format,
@@ -2410,10 +2411,30 @@ def add_prometheus_track_response_middleware(
 def _get_fastapi_request_path(request) -> Tuple[str, bool]:
     from starlette.routing import Match
 
-    for route in request.app.routes:
-        match, child_scope = route.matches(request.scope)
-        if match == Match.FULL:
-            return getattr(route, "path", request.url.path), True
+    def _match_path(routes, scope):
+            for route in routes:
+                match, child_scope = route.matches(scope)
+                if match != Match.FULL:
+                    continue
+                path = getattr(route, "path", None)
+                if path is not None:
+                    return path
+                # FastAPI >=0.137 no longer flattens included routers into
+                # app.routes; the matching wrapper (e.g. _IncludedRouter) exposes no
+                # `.path`. Descend into the wrapped router's routes to recover the
+                # templated path instead of raising AttributeError (#28887).
+                nested = getattr(
+                    getattr(route, "original_router", None), "routes", None
+                ) or getattr(route, "routes", None)
+                if nested:
+                    resolved = _match_path(nested, {**scope, **(child_scope or {})})
+                    if resolved is not None:
+                        return resolved
+            return None
+
+    path = _match_path(request.app.routes, request.scope)
+    if path is not None:
+        return path, True
 
     return request.url.path, False
 
