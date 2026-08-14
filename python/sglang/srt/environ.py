@@ -1175,6 +1175,12 @@ class Envs:
     # Per-rank local query rows (after DP-attention sharding when enabled),
     # not request ISL.
     SGLANG_OPT_DSV4_NONPAGED_INDEXER_MIN_QUERY_TOKENS = EnvInt(8192)
+    # Budget (in MiB) for the fp32 [query_rows, max_seqlen_k] logits tensor
+    # produced by fp8_mqa_logits in the nonpaged indexer path. When the full
+    # tensor would exceed this budget, queries are processed in chunks with the
+    # top-k transform fused per chunk, bounding peak memory. <= 0 disables
+    # chunking (always materialize the full logits tensor).
+    SGLANG_OPT_DSV4_NONPAGED_INDEXER_LOGITS_CHUNK_MB = EnvInt(2048)
     SGLANG_OPT_USE_JIT_INDEXER_METADATA = EnvBool(True)
     SGLANG_OPT_USE_ONLINE_COMPRESS = EnvBool(False)
     SGLANG_EXPERIMENTAL_ONLINE_C128_MTP = EnvBool(False)

@@ -261,6 +261,114 @@ class TestDSV4NonPagedIndexer(CustomTestCase):
         with threshold.override(8193):
             self.assertIsNone(build_plan(8192))
 
+    def test_logits_chunk_planning(self):
+        plan_chunks = C4IndexerBackendMixin._plan_nonpaged_indexer_chunks
+        env = envs.SGLANG_OPT_DSV4_NONPAGED_INDEXER_LOGITS_CHUNK_MB
+        kwargs = dict(
+            query_rows=16384, max_seqlen_k=16384, prefix_len=49152, c4_page_size=64
+        )
+
+        with env.override(0):
+            self.assertIsNone(plan_chunks(**kwargs))
+        # Budget large enough for the full [16384, 16384] fp32 logits: no chunks.
+        with env.override(1024):
+            self.assertIsNone(plan_chunks(**kwargs))
+
+        # 256 MiB / (16384 cols * 4 B) = 4096 rows per chunk.
+        with env.override(256):
+            chunks = plan_chunks(**kwargs)
+        self.assertEqual(
+            [(s, e) for s, e, _ in chunks],
+            [(0, 4096), (4096, 8192), (8192, 12288), (12288, 16384)],
+        )
+        for _, end, width in chunks:
+            self.assertEqual(width % 64, 0)
+            # Wide enough for the causal key range ke[end-1] = (prefix + end) // 4.
+            self.assertGreaterEqual(width, (49152 + end) // 4)
+            self.assertLessEqual(width, 16384)
+        self.assertEqual(chunks[-1][2], 16384)
+
+        # A tiny budget is clamped to the minimum chunk rows.
+        with env.override(1):
+            chunks = plan_chunks(**kwargs)
+        self.assertEqual(chunks[0][1] - chunks[0][0], 2048)
+        self.assertEqual(chunks[-1][1], 16384)
+
+    def test_chunked_dispatch_slices_queries(self):
+        backend = C4IndexerBackendMixin()
+        query_rows = 6144
+        prefix_len = 256
+        chunks = [(0, 2048, 576), (2048, 4096, 1088), (4096, 6144, 1600)]
+        ke = torch.div(
+            torch.arange(
+                prefix_len + 1, prefix_len + query_rows + 1, dtype=torch.int32
+            ),
+            4,
+            rounding_mode="floor",
+        )
+        plan = NonPagedIndexerPlan(
+            page_table=torch.tensor([[3, 1]], dtype=torch.int32),
+            gather_seq_lens=ke[-1:],
+            ks=torch.zeros(query_rows, dtype=torch.int32),
+            ke=ke,
+            seq_len_sum=1600,
+            max_seq_len=1600,
+            max_seqlen_k=1600,
+            query_rows=query_rows,
+            chunks=chunks,
+        )
+        q_indexer = torch.zeros((query_rows, 2, 128), dtype=torch.uint8).view(FP8_DTYPE)
+        weights = torch.ones((query_rows, 2), dtype=torch.float32)
+        token_to_kv_pool = MagicMock()
+        token_to_kv_pool.get_index_k_scale_buffer.return_value = (
+            torch.zeros((1600, 128), dtype=torch.uint8),
+            torch.zeros((1600, 4), dtype=torch.uint8),
+        )
+        page_table = torch.zeros((query_rows, 2), dtype=torch.int32)
+        c4_sparse_page_indices = torch.full((query_rows, 512), -1, dtype=torch.int32)
+
+        chunk_logits = [MagicMock(name=f"logits{i}") for i in range(len(chunks))]
+        deep_gemm = SimpleNamespace(fp8_mqa_logits=MagicMock(side_effect=chunk_logits))
+        topk_calls = MagicMock()
+
+        with (
+            patch.dict(sys.modules, {"deep_gemm": deep_gemm}),
+            patch.object(backend, "_run_topk_transform", topk_calls),
+            envs.SGLANG_OPT_USE_TOPK_V2.override(False),
+        ):
+            backend._forward_nonpaged_indexer_chunked(
+                q_indexer=q_indexer,
+                weights=weights,
+                c4_indexer=SimpleNamespace(layer_id=17),
+                token_to_kv_pool=token_to_kv_pool,
+                plan=plan,
+                c4_seq_lens=ke,
+                page_table=page_table,
+                c4_sparse_page_indices=c4_sparse_page_indices,
+                c4_page_size=64,
+                raw_indices=None,
+            )
+
+        # KV is gathered exactly once, reused by all chunks.
+        token_to_kv_pool.get_index_k_scale_buffer.assert_called_once()
+        self.assertEqual(deep_gemm.fp8_mqa_logits.call_count, len(chunks))
+        self.assertEqual(topk_calls.call_count, len(chunks))
+        for i, (start, end, width) in enumerate(chunks):
+            gemm_call = deep_gemm.fp8_mqa_logits.call_args_list[i]
+            self.assertEqual(gemm_call.args[0].shape[0], end - start)
+            torch.testing.assert_close(gemm_call.args[3], plan.ks[start:end])
+            torch.testing.assert_close(gemm_call.args[4], ke[start:end])
+            self.assertEqual(
+                gemm_call.kwargs, {"clean_logits": False, "max_seqlen_k": width}
+            )
+            topk_call = topk_calls.call_args_list[i]
+            self.assertIs(topk_call.kwargs["logits"], chunk_logits[i])
+            torch.testing.assert_close(topk_call.kwargs["c4_seq_lens"], ke[start:end])
+            self.assertEqual(
+                topk_call.kwargs["c4_sparse_page_indices"].shape, (end - start, 512)
+            )
+            self.assertIsNone(topk_call.kwargs["raw_indices"])
+
     def test_nonpaged_dispatch_uses_gathered_kv_contract(self):
         query_rows = 4
         plan = NonPagedIndexerPlan(

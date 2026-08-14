@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 import torch
 
@@ -105,6 +105,11 @@ class NonPagedIndexerPlan:
     max_seq_len: int
     max_seqlen_k: int
     query_rows: int
+    # Query-row chunks (row_start, row_end, chunk_max_seqlen_k) bounding the
+    # fp32 logits produced per fp8_mqa_logits call. None = single-shot.
+    chunks: Optional[List[Tuple[int, int, int]]] = None
+    # Lazily built per-chunk plan_topk_v2 metadata, aligned with `chunks`.
+    chunk_topk_metadata: Optional[List[torch.Tensor]] = None
 
 
 @dataclass
