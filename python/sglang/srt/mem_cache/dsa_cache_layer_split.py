@@ -511,7 +511,7 @@ class LayerSplitDSATokenToKVPool(DSATokenToKVPool):
 
     # ---- HiCache CPU offload: skip empty (non-owned) layers ---------------
 
-    def get_cpu_copy(self, indices, mamba_indices=None):
+    def get_cpu_copy(self, indices, mamba_indices=None, req_pool_idx=None):
         from sglang.srt.utils import current_platform
 
         current_platform.synchronize()
@@ -546,7 +546,7 @@ class LayerSplitDSATokenToKVPool(DSATokenToKVPool):
         torch.cuda.synchronize()
         return {"kv": kv_cache_cpu, "index_k": index_k_cpu}
 
-    def load_cpu_copy(self, kv_cache_cpu_dict, indices, mamba_indices=None):
+    def load_cpu_copy(self, kv_cache_cpu_dict, indices, mamba_indices=None, req_pool_idx=None):
         from sglang.srt.utils import current_platform
 
         kv_cache_cpu = kv_cache_cpu_dict["kv"]

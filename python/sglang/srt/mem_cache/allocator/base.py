@@ -77,11 +77,11 @@ class BaseTokenToKVPoolAllocator(abc.ABC):
                 (0,), dtype=self.release_pages.dtype, device=self.device
             )
 
-    def get_cpu_copy(self, indices, mamba_indices=None):
+    def get_cpu_copy(self, indices, mamba_indices=None, req_pool_idx=None):
         # FIXME: reuse the get_cpu_copy after paged allocator is implemented
         raise NotImplementedError()
 
-    def load_cpu_copy(self, kv_cache_cpu, indices, mamba_indices=None):
+    def load_cpu_copy(self, kv_cache_cpu, indices, mamba_indices=None, req_pool_idx=None):
         # FIXME: reuse the load_cpu_copy after paged allocator is implemented
         raise NotImplementedError()
 

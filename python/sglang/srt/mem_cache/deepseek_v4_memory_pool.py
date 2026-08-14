@@ -166,7 +166,7 @@ class DeepSeekV4SingleKVPool(KVCache):
     def get_kv_buffer(self, layer_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError("Use get_key_buffer instead.")
 
-    def get_cpu_copy(self, indices, mamba_indices=None):
+    def get_cpu_copy(self, indices, mamba_indices=None, req_pool_idx=None):
         current_platform.synchronize()
         page_indices = torch.unique_consecutive(indices // self.page_size)
         kv_cache_cpu = []
@@ -182,7 +182,7 @@ class DeepSeekV4SingleKVPool(KVCache):
         current_platform.synchronize()
         return kv_cache_cpu
 
-    def load_cpu_copy(self, kv_cache_cpu, indices, mamba_indices=None):
+    def load_cpu_copy(self, kv_cache_cpu, indices, mamba_indices=None, req_pool_idx=None):
         current_platform.synchronize()
         page_indices = torch.unique_consecutive(indices // self.page_size)
         chunk_size = max(1, self.cpu_offloading_chunk_size // self.page_size)
@@ -272,10 +272,10 @@ class HiSparseC4DevicePool(DeepSeekV4SingleKVPool):
         loc = self.translate_loc_to_hisparse_device(loc)
         return super().set_key_buffer_fused(layer_id, loc, cache_k)
 
-    def get_cpu_copy(self, indices, mamba_indices=None):
+    def get_cpu_copy(self, indices, mamba_indices=None, req_pool_idx=None):
         raise NotImplementedError("HiSparseC4DevicePool does not support get_cpu_copy")
 
-    def load_cpu_copy(self, kv_cache_cpu, indices, mamba_indices=None):
+    def load_cpu_copy(self, kv_cache_cpu, indices, mamba_indices=None, req_pool_idx=None):
         raise NotImplementedError("HiSparseC4DevicePool does not support load_cpu_copy")
 
 
@@ -409,7 +409,7 @@ class DeepSeekV4IndexerPool(KVCache):
             page_size=self.page_size,
         )
 
-    def get_cpu_copy(self, indices, mamba_indices=None):
+    def get_cpu_copy(self, indices, mamba_indices=None, req_pool_idx=None):
         current_platform.synchronize()
         page_indices = torch.unique_consecutive(indices // self.page_size)
         index_k_cpu = []
@@ -425,7 +425,7 @@ class DeepSeekV4IndexerPool(KVCache):
         current_platform.synchronize()
         return index_k_cpu
 
-    def load_cpu_copy(self, index_k_cpu, indices, mamba_indices=None):
+    def load_cpu_copy(self, index_k_cpu, indices, mamba_indices=None, req_pool_idx=None):
         current_platform.synchronize()
         page_indices = torch.unique_consecutive(indices // self.page_size)
         chunk_size = max(1, self.cpu_offloading_chunk_size // self.page_size)
@@ -1214,6 +1214,10 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
             if pool is None:
                 state_cpu.append(None)
                 continue
+            # C128 is request-scoped; handled by _get_c128_state_cpu_copy.
+            if pool.ratio == 128:
+                state_cpu.append(None)
+                continue
             state_locs = pool.translate_from_swa_loc_to_state_loc(swa_indices)
             state_cpu.append(
                 pool.kv_score_buffer.kv_score[state_locs].to("cpu", non_blocking=True)
@@ -1232,7 +1236,7 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
 
         current_platform.synchronize()
         for pool, cpu_tensor in zip(state_pools, state_cpu):
-            if pool is None or cpu_tensor is None:
+            if pool is None or cpu_tensor is None or pool.ratio == 128:
                 continue
             state_locs = pool.translate_from_swa_loc_to_state_loc(swa_indices)
             assert cpu_tensor.shape[0] == len(state_locs)
@@ -1240,6 +1244,65 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
                 pool.kv_score_buffer.kv_score.device, non_blocking=True
             )
             pool.kv_score_buffer.kv_score[state_locs] = state_chunk
+            pool.kv_score_buffer[-1].clear()
+        current_platform.synchronize()
+
+    def _c128_req_state_rows(
+        self, pool: CompressStatePool, req_pool_idx: int
+    ) -> torch.Tensor:
+        """Row indices of request-scoped C128 compress state for ``req_pool_idx``."""
+        device = pool.kv_score_buffer.kv_score.device
+        if pool.ring_size == 1:
+            # Online C128 (+ optional MTP draft banks).
+            n_banks = 1 + int(pool.online_mtp_max_draft_tokens)
+            if n_banks == 1:
+                return torch.tensor([req_pool_idx], device=device, dtype=torch.int64)
+            stride = int(pool.online_mtp_state_slot_offset)
+            return torch.arange(
+                req_pool_idx,
+                req_pool_idx + n_banks * stride,
+                step=stride,
+                device=device,
+                dtype=torch.int64,
+            )
+        start = int(req_pool_idx) * int(pool.ring_size)
+        return torch.arange(
+            start, start + int(pool.ring_size), device=device, dtype=torch.int64
+        )
+
+    def _get_c128_state_cpu_copy(self, req_pool_idx: Optional[int]):
+        if req_pool_idx is None:
+            return None
+
+        current_platform.synchronize()
+        state_cpu = []
+        for pool in self.compress_state_pools:
+            if pool is None or pool.ratio != 128:
+                state_cpu.append(None)
+                continue
+            rows = self._c128_req_state_rows(pool, int(req_pool_idx))
+            state_cpu.append(
+                pool.kv_score_buffer.kv_score[rows].to("cpu", non_blocking=True)
+            )
+        current_platform.synchronize()
+        return state_cpu
+
+    def _load_c128_state_cpu_copy(
+        self, state_cpu, req_pool_idx: Optional[int]
+    ) -> None:
+        if state_cpu is None or req_pool_idx is None:
+            return
+
+        current_platform.synchronize()
+        for pool, cpu_tensor in zip(self.compress_state_pools, state_cpu):
+            if pool is None or cpu_tensor is None or pool.ratio != 128:
+                continue
+            rows = self._c128_req_state_rows(pool, int(req_pool_idx))
+            assert cpu_tensor.shape[0] == len(rows)
+            state_chunk = cpu_tensor.to(
+                pool.kv_score_buffer.kv_score.device, non_blocking=True
+            )
+            pool.kv_score_buffer.kv_score[rows] = state_chunk
             pool.kv_score_buffer[-1].clear()
         current_platform.synchronize()
 
@@ -1287,7 +1350,7 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
             filtered.append(filtered_layer)
         return filtered
 
-    def get_cpu_copy(self, indices, mamba_indices=None):
+    def get_cpu_copy(self, indices, mamba_indices=None, req_pool_idx=None):
         c4_indices, _ = self._compressed_indices_from_full(indices, 4)
         c128_indices, _ = self._compressed_indices_from_full(indices, 128)
 
@@ -1323,9 +1386,10 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
             "indexer_state": self._get_state_cpu_copy(
                 self.indexer_compress_state_pools, swa_indices
             ),
+            "c128_state": self._get_c128_state_cpu_copy(req_pool_idx),
         }
 
-    def load_cpu_copy(self, kv_cache_cpu, indices, mamba_indices=None):
+    def load_cpu_copy(self, kv_cache_cpu, indices, mamba_indices=None, req_pool_idx=None):
         c4_indices, _ = self._compressed_indices_from_full(indices, 4)
         c128_indices, _ = self._compressed_indices_from_full(indices, 128)
 
@@ -1334,6 +1398,8 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
             self.c4_kv_pool.load_cpu_copy(c4_cpu, c4_indices)
         self.c4_indexer_kv_pool.load_cpu_copy(kv_cache_cpu["c4_indexer"], c4_indices)
         self.c128_kv_pool.load_cpu_copy(kv_cache_cpu["c128"], c128_indices)
+        # Restore before SWA early-return: C128 state is req-scoped, independent of SWA.
+        self._load_c128_state_cpu_copy(kv_cache_cpu.get("c128_state"), req_pool_idx)
 
         swa_cpu = kv_cache_cpu.get("swa")
         full_to_swa_index_mapping = getattr(self, "full_to_swa_index_mapping", None)
