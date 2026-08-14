@@ -1,0 +1,11 @@
+python tuning_deepep.py \
+  --nnodes 2 \
+  --node-rank 0 \
+  --master-addr 10.8.20.12 \
+  --master-port 9991 \
+  --num-sms 24 \
+  --num-tokens 8192 \
+  --hidden 6144 \
+  --num-topk 8 \
+  --num-experts 256 \
+  --output-path /data/liuchen/deep_ep/configs/glm52_deepep_internode_ep16_24sms.json

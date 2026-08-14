@@ -124,6 +124,14 @@ def _is_two_chunk_split_enabled(extend_lens: Sequence[int]) -> bool:
     if child_a_batch_size > child_a_num_q_tokens:
         return False
 
+    # When the overall_sum // 2 cut lands exactly on a sequence boundary
+    # (e.g. extend_lens = [2, 3]), the seq at split_seq_index would receive
+    # 0 query tokens in child_a, violating the DSV4 compress planner
+    # invariant `0 < extend_len` per request. A seq-boundary split at this
+    # index is perfectly balanced anyway, so fall back to it.
+    if sum(extend_lens[:split_seq_index]) == child_a_num_q_tokens:
+        return False
+
     return True
 
 

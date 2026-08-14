@@ -350,8 +350,14 @@ class DeepGemmRunnerCore(MoeRunnerCore):
             )
 
             if self.swiglu_limit is not None:
+                from sglang.srt.layers.dp_attention import get_is_extend_in_batch
+
+                # Prefill only: gateup_output can be huge (all_tokens x N), so
+                # clamp in-place instead of cat-ing into a second full-size
+                # tensor. Decode (e.g. deepep_mode=normal, incl. graph capture)
+                # keeps the out-of-place concat path.
                 gateup_output = _apply_swiglu_limit(
-                    gateup_output, swiglu_limit=self.swiglu_limit
+                    gateup_output, swiglu_limit=self.swiglu_limit, inplace=get_is_extend_in_batch(),
                 )
 
             if not _is_musa:
@@ -1350,7 +1356,7 @@ def _situ_mul_quant_contig_kernel(
 
 
 def _apply_swiglu_limit(
-    gateup_output: torch.Tensor, swiglu_limit: float
+    gateup_output: torch.Tensor, swiglu_limit: float, inplace: bool = False
 ) -> torch.Tensor:
     assert swiglu_limit == 10
 
@@ -1360,6 +1366,15 @@ def _apply_swiglu_limit(
     gate, up = torch.chunk(gateup_output, chunks=2, dim=-1)
     assert gate.shape == (num_tokens, hidden_size_x2 // 2)
     assert up.shape == (num_tokens, hidden_size_x2 // 2)
+
+    if inplace:
+        # gate/up are views into gateup_output and cat([gate, up]) would just
+        # reproduce its layout, so clamp in-place to avoid materializing the
+        # clamped halves plus a full-size concat (a ~3x transient peak on the
+        # large prefill activation).
+        up.clamp_(min=-swiglu_limit, max=swiglu_limit)
+        gate.clamp_(max=swiglu_limit)
+        return gateup_output
 
     up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
     gate = torch.clamp(gate, max=swiglu_limit)

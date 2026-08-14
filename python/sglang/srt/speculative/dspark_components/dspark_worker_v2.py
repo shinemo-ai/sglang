@@ -1,4 +1,5 @@
 import logging
+from contextlib import ExitStack, contextmanager
 from contextlib import nullcontext
 from dataclasses import replace
 from typing import Optional
@@ -8,6 +9,11 @@ import torch
 from sglang.srt.configs.hybrid_arch import mambaish_config
 from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.environ import envs
+from sglang.srt.layers.logprob_processor import compute_spec_v2_logprobs
+from sglang.srt.layers.moe.utils import (
+    speculative_moe_a2a_backend_context,
+    speculative_moe_backend_context,
+)
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.scheduler import GenerationBatchResult
 from sglang.srt.managers.tp_worker import TpModelWorker
@@ -293,10 +299,14 @@ class DSparkWorkerV2(BaseSpecWorker):
             raise AttributeError(name)
         return getattr(self.target_worker, name)
 
+    @contextmanager
     def _draft_context(self):
-        if self._draft_dp_context_enabled:
-            return draft_tp_context(get_parallel().attn_tp_group)
-        return nullcontext()
+        with ExitStack() as stack:
+            if self._draft_dp_context_enabled:
+                stack.enter_context(draft_tp_context(get_parallel().attn_tp_group))
+            stack.enter_context(speculative_moe_backend_context())
+            stack.enter_context(speculative_moe_a2a_backend_context())
+            yield
 
     def alloc_memory_pool(
         self,
@@ -387,11 +397,6 @@ class DSparkWorkerV2(BaseSpecWorker):
         on_publish=None,
         grammar_barrier=None,
     ) -> GenerationBatchResult:
-        if getattr(batch, "return_logprob", False):
-            raise ValueError(
-                "DSpark speculative decoding does not support return_logprob yet."
-            )
-
         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
             self._verify_planner.note_non_decode_step()
             self._observers.note_prefill_step()
@@ -520,7 +525,8 @@ class DSparkWorkerV2(BaseSpecWorker):
             self._observers.note_idle_decode_step()
             if get_parallel().enable_dp_attention:
                 if self._draft_is_moe:
-                    self._proposer.run_idle_participation(batch)
+                    with self._draft_context():
+                        self._proposer.run_idle_participation(batch)
                 self._verify_executor.run_idle_participation(
                     batch=batch, idle_layout=self._idle_verify_ragged_layout(batch)
                 )
@@ -674,6 +680,21 @@ class DSparkWorkerV2(BaseSpecWorker):
                 on_publish(accept.new_seq_lens, confidence=confidence)
             else:
                 on_publish(accept.new_seq_lens)
+
+        if batch.return_logprob:
+            # Compact verify scatters logits back to dense
+            # [bs * verify_num_draft_tokens, vocab]; same layout as DFlash.
+            stride = int(self.verify_num_draft_tokens)
+            output_indices = torch.arange(
+                bs * stride, dtype=torch.int64, device=device
+            ).view(bs, stride)
+            compute_spec_v2_logprobs(
+                batch,
+                logits_output,
+                accept.out_tokens.reshape(-1),
+                output_indices,
+                stride - 1,
+            )
 
         self._commit_target_mamba_states_after_verify(
             batch=batch,

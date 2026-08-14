@@ -1312,7 +1312,7 @@ class Scheduler(
             self.disaggregation_mode == DisaggregationMode.DECODE
         ):  # *8 headroom for MiniMax-M3; *2 for other models.
             buffer_multiplier = (
-                8 if is_minimax_sparse(self.model_config.hf_config) else 2
+                8 if is_minimax_sparse(self.model_config.hf_config) else 4
             )
             buffer_size = (self.req_to_token_pool.size) * buffer_multiplier
             self.req_to_metadata_buffer_idx_allocator = ReqToMetadataIdxAllocator(
@@ -1360,7 +1360,7 @@ class Scheduler(
 
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
             # *2 for the headroom.
-            buffer_size = self.max_running_requests * 2
+            buffer_size = self.max_running_requests * 4
             self.req_to_metadata_buffer_idx_allocator = ReqToMetadataIdxAllocator(
                 buffer_size
             )
@@ -3201,11 +3201,22 @@ class Scheduler(
 
             running_bs = len(running_batch.reqs)
             if len(adder.can_run_list) >= self.get_num_allocatable_reqs(running_bs):
+                logger.info(
+                    f"Batch is full, cannot add request {req.rid} to the batch. "
+                    f"Current batch size: {len(adder.can_run_list)}, "
+                    f"Running batch size: {running_bs}, "
+                    f"Available slots: {self.get_num_allocatable_reqs(running_bs)}"
+                )
                 running_batch.batch_is_full = True
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
                 # In prefill mode, prealloc queue and transfer queue can also take memory,
                 # so we need to check if the available size for the actual available size.
                 if len(adder.can_run_list) >= self.req_to_token_pool.available_size():
+                    logger.info(
+                        f"Batch is full, cannot add request {req.rid} to the batch. "
+                        f"Current batch size: {len(adder.can_run_list)}, "
+                        f"req_to_token_pool available size: {self.req_to_token_pool.available_size()}"
+                    )
                     running_batch.batch_is_full = True
 
             if running_batch.batch_is_full:
@@ -3213,6 +3224,11 @@ class Scheduler(
                     not self.enable_priority_preemption
                     or not adder.preempt_to_schedule(req, self.server_args)
                 ):
+                    logger.info(
+                        f"Batch is full, cannot add request {req.rid} to the batch. "
+                        f"Current batch size: {len(adder.can_run_list)}, "
+                        f"Running batch size: {running_bs}, "
+                    )
                     break
 
             if self.enable_hicache_storage:

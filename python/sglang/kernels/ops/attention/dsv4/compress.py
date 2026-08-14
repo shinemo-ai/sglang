@@ -274,19 +274,33 @@ class CompressorPrefillPlan(NamedTuple):
             module = _jit_compress_plan_module()
             fn = module.plan_prefill
 
-        plan_c, plan_w = fn(
-            req_pool_indices,
-            req_to_token,
-            full_to_state,
-            seq_lens,
-            extend_lens,
-            pin_buffer,
-            int(num_q_tokens),
-            int(compress_ratio),
-            int(swa_page_size),
-            int(ring_size),
-            bool(use_cuda_graph),
-        )
+        try:
+            plan_c, plan_w = fn(
+                req_pool_indices,
+                req_to_token,
+                full_to_state,
+                seq_lens,
+                extend_lens,
+                pin_buffer,
+                int(num_q_tokens),
+                int(compress_ratio),
+                int(swa_page_size),
+                int(ring_size),
+                bool(use_cuda_graph),
+            )
+        except Exception:
+            _sl = seq_lens.cpu().tolist()
+            _el = extend_lens.cpu().tolist()
+            import logging
+            logging.getLogger(__name__).error(
+                "plan_prefill FAILED: ratio=%s bs=%d num_q_tokens=%d sum_ext=%d "
+                "min_ext=%s max_ext=%s min(seq-ext)=%s cuda_graph=%s\nseq=%s\next=%s",
+                compress_ratio, len(_sl), int(num_q_tokens), sum(_el),
+                min(_el), max(_el), min(s - e for s, e in zip(_sl, _el)),
+                use_cuda_graph, _sl, _el,
+            )
+            raise
+        
         return CompressorPrefillPlan(
             compress_ratio,
             torch.from_dlpack(plan_c) if not _is_xpu else plan_c,

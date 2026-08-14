@@ -2170,7 +2170,8 @@ def configure_logger(server_args, prefix: str = ""):
         logging.config.dictConfig(custom_config)
         return
     maybe_ms = ".%(msecs)03d" if envs.SGLANG_LOG_MS.get() else ""
-    format = f"[%(asctime)s{maybe_ms}{prefix}] %(message)s"
+    #format = f"[%(asctime)s{maybe_ms}{prefix}] %(message)s"
+    format = f"%(asctime)s{maybe_ms}|%(threadName)s|%(process)d|%(thread)d|%(levelname)s|%(module)s.%(filename)s:%(lineno)d|{prefix}|%(message)s"
     logging.basicConfig(
         level=getattr(logging, server_args.log_level.upper()),
         format=format,
@@ -3557,7 +3558,9 @@ def require_mlp_tp_gather(server_args: ServerArgs):
 
     # elastic-EP scale-up rewrites dp_size on the published config
     if get_parallel().enable_dp_attention:
-        assert get_parallel().dp_size > 1, "dp_size must be greater than 1"
+        if get_parallel().dp_size <= 1:
+            return False
+        # assert get_parallel().dp_size > 1, "dp_size must be greater than 1"
         if get_exec().moe.elastic_ep_backend is not None:
             from sglang.srt.elastic_ep.elastic_ep import (
                 elastic_expanded_world_enabled,
