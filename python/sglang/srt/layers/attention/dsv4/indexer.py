@@ -591,7 +591,7 @@ class C4IndexerBackendMixin:
         ks = torch.zeros_like(ke)
         c4_page_size = indexer_metadata.c4_page_size
         max_seqlen_k = (final_c4_len + c4_page_size - 1) // c4_page_size * c4_page_size
-        chunks = self._plan_nonpaged_indexer_chunks(
+        chunks = C4IndexerBackendMixin._plan_nonpaged_indexer_chunks(
             query_rows=query_rows,
             max_seqlen_k=max_seqlen_k,
             prefix_len=seq_lens_cpu[0] - extend_lens_cpu[0],
