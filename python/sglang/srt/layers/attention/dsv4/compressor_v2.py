@@ -27,6 +27,10 @@ FusedCompressMetadata: TypeAlias = CompressMetadata
 
 _is_hip = is_hip_runtime()
 
+# Bit split of the packed (ragged_id, buffer_len/batch_id) plan words; must
+# match kPlanRaggedBits in sgl_kernel/deepseek_v4/compress_v2.cuh.
+_PLAN_RAGGED_ID_MASK = (1 << 20) - 1
+
 
 def _use_online_compress(compress_ratio: int) -> bool:
     """Online state-pool path is c128-only."""
@@ -85,7 +89,7 @@ def _compress_forward_c128_fallback(
             plan_w = plan[2]  # [num_w, 8] uint8 = WritePlan
             if plan_w.shape[0] > 0:
                 plan_w_raw = plan_w.view(torch.int32)  # [num_w, 2]
-                ragged_ids = plan_w_raw[:, 0].long() & 0xFFFF
+                ragged_ids = plan_w_raw[:, 0].long() & _PLAN_RAGGED_ID_MASK
                 write_locs = plan_w_raw[:, 1].long()
                 valid_write = (write_locs >= 0) & (write_locs < num_total_slots)
                 ragged_ids_safe = ragged_ids.clamp(
@@ -358,7 +362,7 @@ class CompressorBackendMixin:
         else:
             kv_to_store = kv_compressed
             plan_raw = plan[1].view(torch.int32)
-            ragged_ids = plan_raw[:, 1].to(torch.int32) & 0xFFFF
+            ragged_ids = plan_raw[:, 1].to(torch.int32) & _PLAN_RAGGED_ID_MASK
             out_loc_to_store = out_loc[ragged_ids.long()]
 
         if kv_to_store.shape[0] == 0:

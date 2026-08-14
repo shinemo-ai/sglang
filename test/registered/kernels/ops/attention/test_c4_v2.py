@@ -210,7 +210,7 @@ def test_prefill_then_decode(mode: str, prefix_len: int) -> None:
 
 @pytest.mark.parametrize("mode", ["legacy", "paged"])
 @pytest.mark.parametrize("prefix_len", [256, 512, 768])
-@pytest.mark.parametrize("extend_len", [4, 32])
+@pytest.mark.parametrize("extend_len", [4, 32, 65536])
 def test_prefill_then_extend(mode: str, prefix_len: int, extend_len: int) -> None:
     """Prefill once, then prefill an extend that crosses one or more compress events.
 

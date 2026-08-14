@@ -26,14 +26,19 @@ using R2T_T = int32_t;
 using F2S_T = int64_t;
 using IDX_T = int64_t;
 
-/// NOTE: for the internal use, we pack the ragged and batch id, since both not exceed 65536
+using device::compress::kPlanMaxBatchId;
+using device::compress::kPlanMaxRaggedId;
+using device::compress::kPlanRaggedBits;
+
+/// NOTE: for the internal use, we pack the ragged id (low kPlanRaggedBits bits)
+/// and batch id (remaining high bits); the planner entry points bounds-check both.
 SGL_DEVICE __host__ PlanW pack_w(uint32_t ragged_id, uint32_t batch_id, int32_t seq_len) {
-  return {static_cast<uint32_t>(ragged_id | batch_id << 16), seq_len};
+  return {static_cast<uint32_t>(ragged_id | batch_id << kPlanRaggedBits), seq_len};
 }
 
-/// NOTE: for the internal use, we pack the ragged and batch id, since both not exceed 65536
+/// NOTE: for the internal use, unpack `(ragged_id, batch_id)` packed by `pack_w`.
 SGL_DEVICE uint2 unpack_w(PlanW plan) {
-  return {static_cast<uint16_t>(plan.ragged_id), static_cast<uint16_t>(plan.ragged_id >> 16)};
+  return {plan.ragged_id & kPlanMaxRaggedId, plan.ragged_id >> kPlanRaggedBits};
 }
 
 struct Prefill0Params {
@@ -192,13 +197,12 @@ __global__ __launch_bounds__(1024, 1)  //
       if ((position + 1) % cr == 0) {
         const int32_t buffer_len = window_size - min(static_cast<int32_t>(j) + 1, window_size);
         const uint32_t out_idx = atomicAdd(&counter_c, 1u);
-        params.plan_c[out_idx] = {
-            .seq_len = static_cast<uint32_t>(position + 1),
-            .ragged_id = static_cast<uint16_t>(ragged_id),
-            .buffer_len = static_cast<uint16_t>(buffer_len),
-            .read_page_0 = -1,
-            .read_page_1 = static_cast<int32_t>(batch_id),
-        };
+        params.plan_c[out_idx] = PlanC::make(
+            /*seq_len=*/static_cast<uint32_t>(position + 1),
+            /*ragged_id=*/ragged_id,
+            /*buffer_len=*/static_cast<uint32_t>(buffer_len),
+            /*read_page_0=*/-1,
+            /*read_page_1=*/static_cast<int32_t>(batch_id));
       }
 
       const int32_t last_c_pos = (sl / cr) * cr;
@@ -227,13 +231,12 @@ __global__ __launch_bounds__(1024, 1)  //
         if ((position + 1) % cr == 0) {
           const int32_t buffer_len = window_size - min(j + 1, window_size);
           const uint32_t out_idx = atomicAdd(&counter_c, 1u);
-          params.plan_c[out_idx] = {
-              .seq_len = static_cast<uint32_t>(position + 1),
-              .ragged_id = static_cast<uint16_t>(ragged_id),
-              .buffer_len = static_cast<uint16_t>(buffer_len),
-              .read_page_0 = -1,
-              .read_page_1 = static_cast<int32_t>(batch_id),
-          };
+          params.plan_c[out_idx] = PlanC::make(
+              /*seq_len=*/static_cast<uint32_t>(position + 1),
+              /*ragged_id=*/ragged_id,
+              /*buffer_len=*/static_cast<uint32_t>(buffer_len),
+              /*read_page_0=*/-1,
+              /*read_page_1=*/static_cast<int32_t>(batch_id));
         }
 
         bool do_write = position >= first_w_pos;
@@ -502,9 +505,19 @@ inline PrefillPlan plan_compress_prefill(
   const auto f2s_ptr = static_cast<const F2S_T*>(full_to_state.data_ptr());
 
   const auto batch_size = static_cast<uint32_t>(B.unwrap());
-  constexpr auto kMaxTokens = static_cast<uint32_t>(std::numeric_limits<uint16_t>::max());
+  // ragged ids must fit in the plan's kPlanRaggedBits-bit field, batch ids in
+  // the remaining bits of the packed `WritePlan` word.
+  constexpr auto kMaxTokens = kPlanMaxRaggedId;
   RuntimeCheck(compress_ratio == 4 || compress_ratio == 128);
-  RuntimeCheck(batch_size <= num_q_tokens && num_q_tokens <= kMaxTokens);
+  RuntimeCheck(
+      batch_size <= num_q_tokens && num_q_tokens <= kMaxTokens,
+      "batch_size=",
+      batch_size,
+      " num_q_tokens=",
+      num_q_tokens,
+      " exceeds the plan limit ",
+      kMaxTokens);
+  RuntimeCheck(batch_size <= kPlanMaxBatchId);
   // `swa_page_size` >= `ring_size` >= `compress_ratio`
   RuntimeCheck(swa_page_size % ring_size == 0 && ring_size % compress_ratio == 0);
 
@@ -584,14 +597,13 @@ inline PrefillPlan plan_compress_prefill(
       const int32_t ragged_id = counter + j;
       if (should_compress(position)) {
         const auto buffer_len = window_size - std::min(j + 1, window_size);
-        plan_c_ptr[counter_c++] = {
-            .seq_len = static_cast<uint32_t>(position + 1),
-            .ragged_id = static_cast<uint16_t>(ragged_id),
-            .buffer_len = static_cast<uint16_t>(buffer_len),
-            // to be filled by kernel
-            .read_page_0 = -1,
-            .read_page_1 = static_cast<int32_t>(i),
-        };
+        plan_c_ptr[counter_c++] = PlanC::make(
+            /*seq_len=*/static_cast<uint32_t>(position + 1),
+            /*ragged_id=*/static_cast<uint32_t>(ragged_id),
+            /*buffer_len=*/static_cast<uint32_t>(buffer_len),
+            // read pages to be filled by kernel
+            /*read_page_0=*/-1,
+            /*read_page_1=*/static_cast<int32_t>(i));
       }
       if (should_write(position)) {
         plan_w_ptr[counter_w++] = pack_w(ragged_id, i, position + 1);
@@ -734,9 +746,17 @@ inline PrefillPlan plan_compress_prefill_legacy(
 
   const auto window_size = compress_ratio * (is_overlap ? 2 : 1);
   const auto batch_size = static_cast<uint32_t>(B.unwrap());
-  constexpr auto kMaxTokens = static_cast<uint32_t>(std::numeric_limits<uint16_t>::max());
+  constexpr auto kMaxTokens = kPlanMaxRaggedId;
   RuntimeCheck(compress_ratio == 4 || compress_ratio == 128);
-  RuntimeCheck(batch_size <= num_q_tokens && num_q_tokens <= kMaxTokens);
+  RuntimeCheck(
+      batch_size <= num_q_tokens && num_q_tokens <= kMaxTokens,
+      "batch_size=",
+      batch_size,
+      " num_q_tokens=",
+      num_q_tokens,
+      " exceeds the plan limit ",
+      kMaxTokens);
+  RuntimeCheck(batch_size <= kPlanMaxBatchId);
 
   uint32_t counter = 0;
   uint32_t counter_c = 0;
@@ -755,14 +775,13 @@ inline PrefillPlan plan_compress_prefill_legacy(
       const int32_t ragged_id = counter + j;
       if (should_compress(position)) {
         const auto buffer_len = window_size - std::min(j + 1, window_size);
-        plan_c_ptr[counter_c++] = {
-            .seq_len = static_cast<uint32_t>(position + 1),
-            .ragged_id = static_cast<uint16_t>(ragged_id),
-            .buffer_len = static_cast<uint16_t>(buffer_len),
-            // to be filled by kernel
-            .read_page_0 = -1,
-            .read_page_1 = static_cast<int32_t>(i),
-        };
+        plan_c_ptr[counter_c++] = PlanC::make(
+            /*seq_len=*/static_cast<uint32_t>(position + 1),
+            /*ragged_id=*/static_cast<uint32_t>(ragged_id),
+            /*buffer_len=*/static_cast<uint32_t>(buffer_len),
+            // read pages to be filled by kernel
+            /*read_page_0=*/-1,
+            /*read_page_1=*/static_cast<int32_t>(i));
       }
       if (should_write(position)) {
         plan_w_ptr[counter_w++] = pack_w(ragged_id, i, position + 1);

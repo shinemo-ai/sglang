@@ -12,6 +12,16 @@
 
 namespace device::compress {
 
+/// \brief Bit split of the 32-bit `(ragged_id, buffer_len)` /
+/// `(ragged_id, batch_id)` words in the prefill plans below. 20 bits allow up
+/// to ~1M query tokens per plan (the previous uint16 split capped
+/// `num_q_tokens` at 65535, which a >64K-token prefill chunk overflows); the
+/// remaining 12 bits are plenty for `buffer_len` (<= 256) and `batch_id`
+/// (<= kMaxPrefillBatchSize = 1024).
+inline constexpr uint32_t kPlanRaggedBits = 20;
+inline constexpr uint32_t kPlanMaxRaggedId = (1u << kPlanRaggedBits) - 1;
+inline constexpr uint32_t kPlanMaxBatchId = (1u << (32 - kPlanRaggedBits)) - 1;
+
 /// \brief Per-batch decode plan. Layout: 16 bytes.
 struct alignas(16) DecodePlan {
   uint32_t seq_len;
@@ -23,8 +33,8 @@ struct alignas(16) DecodePlan {
 /// \brief Per-token compress plan (used by c4/c128 prefill). Layout: 16 bytes.
 struct alignas(16) CompressPlan {
   uint32_t seq_len;
-  uint16_t ragged_id;
-  uint16_t buffer_len;
+  uint32_t ragged_id : kPlanRaggedBits;
+  uint32_t buffer_len : 32 - kPlanRaggedBits;
   int32_t read_page_0;
   /// \brief Stage 0 (CPU): batch_id (used to look up page table).
   /// \brief Stage 1 (GPU): final state-pool write location.
@@ -34,6 +44,20 @@ struct alignas(16) CompressPlan {
     return CompressPlan{-1u, 0, 0, -1, -1};
   }
 
+  /// \brief List-init of the bit-fields from a runtime value trips C++
+  /// narrowing checks, so writers construct plans through this factory.
+  /// Callers must bounds-check `ragged_id` (<= kPlanMaxRaggedId) beforehand.
+  static SGL_DEVICE __host__ CompressPlan
+  make(uint32_t seq_len, uint32_t ragged_id, uint32_t buffer_len, int32_t read_page_0, int32_t read_page_1) {
+    CompressPlan plan;
+    plan.seq_len = seq_len;
+    plan.ragged_id = ragged_id;
+    plan.buffer_len = buffer_len;
+    plan.read_page_0 = read_page_0;
+    plan.read_page_1 = read_page_1;
+    return plan;
+  }
+
   SGL_DEVICE __host__ bool is_invalid() const {
     return seq_len == -1u;
   }
@@ -41,7 +65,7 @@ struct alignas(16) CompressPlan {
 
 /// \brief Per-token write plan (used by c4/c128 prefill). Layout: 8 bytes.
 struct alignas(8) WritePlan {
-  /// \brief Stage 0 (CPU): packed `(batch_id << 16) | ragged_id`.
+  /// \brief Stage 0 (CPU): packed `(batch_id << kPlanRaggedBits) | ragged_id`.
   /// \brief Stage 1 (GPU): just `ragged_id`.
   uint32_t ragged_id;
   /// \brief Stage 0 (CPU): position + 1 (used to look up state slot).
