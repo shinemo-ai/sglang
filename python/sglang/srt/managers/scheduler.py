@@ -3442,6 +3442,21 @@ class Scheduler(
                     ),
                 )
             self.new_token_ratio_tracker.current = new_token_ratio
+
+            abort_retracted = self.disaggregation_mode == DisaggregationMode.DECODE
+            if abort_retracted:
+                abort_msg = (
+                    "KV cache pool is full on the decode worker. "
+                    "The request was aborted."
+                )
+                for req in retracted_reqs:
+                    if req.to_finish is None:
+                        req.to_finish = FINISH_ABORT(
+                            abort_msg,
+                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                        )
+                    reqs_to_abort.append(req)
+
             for req in reqs_to_abort:
                 abort_reason: FINISH_ABORT = req.to_finish
                 self.ipc_channels.send_to_tokenizer.send_output(
@@ -3452,11 +3467,18 @@ class Scheduler(
                     req,
                 )
 
-            msg_prefix = (
-                "KV cache pool is full. Retract requests. "
-                if kv_full_retract_flag
-                else "Testing retraction. "
-            )
+            if abort_retracted:
+                msg_prefix = (
+                    "KV cache pool is full on the decode worker. Aborting requests. "
+                    if kv_full_retract_flag
+                    else "Testing retraction (abort on decode). "
+                )
+            else:
+                msg_prefix = (
+                    "KV cache pool is full. Retract requests. "
+                    if kv_full_retract_flag
+                    else "Testing retraction. "
+                )
             msg_details = f"#retracted_reqs: {len(retracted_reqs)}, #new_tokens_gained: {new_token_gained}"
             if mamba_num_gained is not None:
                 msg_details += f", #mamba_num_gained: {mamba_num_gained}"
@@ -3466,8 +3488,9 @@ class Scheduler(
                 )
             logger.warning(msg_prefix + msg_details)
 
-            for req in retracted_reqs:
-                self._add_request_to_queue(req, is_retracted=True)
+            if not abort_retracted:
+                for req in retracted_reqs:
+                    self._add_request_to_queue(req, is_retracted=True)
         else:
             self.new_token_ratio_tracker.decay_step()
 
