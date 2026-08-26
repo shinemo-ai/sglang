@@ -131,6 +131,13 @@ class PrefetchOperation(StorageOperation):
         self._lock = threading.Lock()
         self._terminated_flag = False
         self.storage_hit_count = 0
+        # Tokens confirmed present in L3 by the exist query (min across prefetch
+        # sync groups), recorded before any host-memory-pressure clamping.
+        self.exist_hit_count = 0
+        # Request-level context recorded at prefetch issue time, for logging.
+        self.total_input_tokens = 0
+        self.l1_matched_tokens = 0
+        self.l2_matched_tokens = 0
         self.start_time = time.monotonic()
         super().__init__(
             None,

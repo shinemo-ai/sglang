@@ -2624,6 +2624,9 @@ class Scheduler(
                     new_input_tokens,
                     tree_cache.get_last_hash_value(req.last_host_node),
                     prefix_keys,
+                    total_input_tokens=len(req.origin_input_ids),
+                    l1_matched_tokens=len(req.prefix_indices),
+                    l2_matched_tokens=req.host_hit_length,
                 )
 
     def _add_request_to_queue(self, req: Req, is_retracted: bool = False):

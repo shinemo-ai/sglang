@@ -1164,6 +1164,9 @@ class UnifiedRadixCache(BasePrefixCache):
         new_input_tokens: list[int],
         last_hash: Optional[str] = None,
         prefix_keys: Optional[list[str]] = None,
+        total_input_tokens: int = 0,
+        l1_matched_tokens: int = 0,
+        l2_matched_tokens: int = 0,
     ) -> None:
         if not self.enable_storage or self.cache_controller is None:
             return
@@ -1175,15 +1178,27 @@ class UnifiedRadixCache(BasePrefixCache):
             is_bigram=self.tree_core.is_eagle,
         ).page_aligned(self.page_size)
         prefetch_length = len(prefetch_key)
-        if (
-            prefetch_length < self.prefetch_threshold
-            or self.cache_controller.prefetch_rate_limited()
-        ):
+        if prefetch_length < self.prefetch_threshold:
+            logger.debug(
+                "HiCache prefetch skip req=%s reason=below_threshold prefetch_tokens=%d threshold=%d",
+                req_id,
+                prefetch_length,
+                self.prefetch_threshold,
+            )
+            return
+        if self.cache_controller.prefetch_rate_limited():
+            logger.info(
+                "HiCache prefetch skip req=%s reason=rate_limited prefetch_tokens=%d occupied=%d capacity=%d",
+                req_id,
+                prefetch_length,
+                self.cache_controller.prefetch_tokens_occupied,
+                self.cache_controller.prefetch_capacity_limit,
+            )
             return
 
         anchor_lock_params = self.inc_host_lock_ref(last_host_node_id).to_dec_params()
         comp_xfers: dict[ComponentType, list[PoolTransfer]] = {}
-        alloc_failed = False
+        alloc_failed_comp: Optional[ComponentType] = None
         for ct in self.tree_components:
             if ct == BASE_COMPONENT_TYPE:
                 continue
@@ -1192,7 +1207,7 @@ class UnifiedRadixCache(BasePrefixCache):
                 last_host_node_id, prefetch_tokens=len(prefetch_key)
             )
             if prep.alloc_failed:
-                alloc_failed = True
+                alloc_failed_comp = ct
                 break
             if prep.host_indices is None:
                 continue
@@ -1211,7 +1226,13 @@ class UnifiedRadixCache(BasePrefixCache):
         sidecar_xfers = self._build_sidecar_transfers(
             CacheTransferPhase.PREFETCH, kv_xfer, comp_xfers
         )
-        if alloc_failed:
+        if alloc_failed_comp is not None:
+            logger.warning(
+                "HiCache prefetch skip req=%s reason=host_alloc_failed component=%s prefetch_tokens=%d",
+                req_id,
+                alloc_failed_comp,
+                prefetch_length,
+            )
             self.cache_controller.append_host_mem_release(
                 extra_pools=[x for xfers in comp_xfers.values() for x in xfers],
             )
@@ -1227,6 +1248,9 @@ class UnifiedRadixCache(BasePrefixCache):
             prefix_keys,
             extra_pools=aux_xfers or None,
         )
+        operation.total_input_tokens = total_input_tokens
+        operation.l1_matched_tokens = l1_matched_tokens
+        operation.l2_matched_tokens = l2_matched_tokens
         self.ongoing_prefetch[req_id] = _OngoingPrefetch(
             last_host_node_id,
             prefetch_key,
@@ -1296,9 +1320,12 @@ class UnifiedRadixCache(BasePrefixCache):
             return False
         if operation.host_indices is None:
             self.cache_controller.terminate_prefetch(operation)
-            self._revoke_pending_prefetch(req_id)
+            self._revoke_pending_prefetch(req_id, reason="terminated_before_alloc")
             return True
 
+        # Snapshot before terminate_prefetch(): it marks the operation terminated,
+        # so the flag afterwards can no longer distinguish an IO-side failure.
+        io_terminated = operation.is_terminated()
         completed_tokens, hash_value = self.cache_controller.terminate_prefetch(
             operation
         )
@@ -1363,8 +1390,20 @@ class UnifiedRadixCache(BasePrefixCache):
         self.cache_controller.prefetch_tokens_occupied -= len(prefetch_key)
 
         self.prefetch_loaded_tokens_by_reqid[req_id] = loaded_from_storage
+        # Why the prefetch stopped. "interrupted" means the request was scheduled
+        # while pages were still being fetched (best_effort stop policy).
+        expected_tokens = len(hash_value) * self.page_size
+        if completed_tokens == expected_tokens:
+            terminate_reason = "completed"
+        elif io_terminated:
+            terminate_reason = "fetch_error"
+        elif self._prefetch_timeout_check_linear_func(operation):
+            terminate_reason = "timeout"
+        else:
+            terminate_reason = "interrupted"
         logger.info(
-            "HiCache prefetch %s req=%s completed_local=%d completed_synced=%d matched=%d loaded=%d released=%d occupied=%d",
+            "HiCache prefetch %s req=%s completed_local=%d completed_synced=%d matched=%d loaded=%d released=%d occupied=%d "
+            "total_input=%d l1_matched=%d l2_matched=%d prefetch_tokens=%d exist_hit=%d host_alloc=%d reason=%s",
             "dropped" if insert_result.host_insert_dropped else "success",
             req_id,
             completed_tokens,
@@ -1373,6 +1412,13 @@ class UnifiedRadixCache(BasePrefixCache):
             loaded_from_storage,
             released_tokens,
             self.cache_controller.prefetch_tokens_occupied,
+            operation.total_input_tokens,
+            operation.l1_matched_tokens,
+            operation.l2_matched_tokens,
+            len(prefetch_key),
+            operation.exist_hit_count,
+            operation.storage_hit_count,
+            terminate_reason,
         )
         if self.enable_storage_metrics and self.storage_metrics_collector is not None:
             self.storage_metrics_collector.log_prefetched_tokens(loaded_from_storage)
@@ -1483,7 +1529,7 @@ class UnifiedRadixCache(BasePrefixCache):
         ) = self.ongoing_prefetch[rid]
         if operation.host_indices is None:
             self.cache_controller.terminate_prefetch(operation)
-            self._revoke_pending_prefetch(rid)
+            self._revoke_pending_prefetch(rid, reason="aborted")
             return
 
         completed_tokens, _ = self.cache_controller.terminate_prefetch(operation)
@@ -1496,7 +1542,7 @@ class UnifiedRadixCache(BasePrefixCache):
         )
         self.cache_controller.prefetch_tokens_occupied -= len(prefetch_key)
 
-    def _revoke_pending_prefetch(self, req_id: str) -> None:
+    def _revoke_pending_prefetch(self, req_id: str, reason: str) -> None:
         info = self.ongoing_prefetch.pop(req_id, None)
         if info is None:
             return
@@ -1508,6 +1554,12 @@ class UnifiedRadixCache(BasePrefixCache):
             anchor_lock_params,
             comp_xfers,
         ) = info
+        logger.info(
+            "HiCache prefetch revoke req=%s reason=%s prefetch_tokens=%d",
+            req_id,
+            reason,
+            len(prefetch_key),
+        )
         cc = self.cache_controller
         cc.append_host_mem_release(
             extra_pools=[x for xfers in comp_xfers.values() for x in xfers]
@@ -1540,7 +1592,7 @@ class UnifiedRadixCache(BasePrefixCache):
 
         def _drain_revoke():
             for req_id in _drain_queue(cc.prefetch_revoke_queue, n_revoke):
-                self._revoke_pending_prefetch(req_id)
+                self._revoke_pending_prefetch(req_id, reason="insufficient_l3_hits")
 
         def _drain_and_alloc_storage_hit():
             for operation in _drain_queue(cc.prefetch_hit_queue, n_storage_hit):
@@ -1551,7 +1603,7 @@ class UnifiedRadixCache(BasePrefixCache):
                     continue
                 if operation.is_terminated():
                     # request was aborted while the storage query was in flight
-                    self._revoke_pending_prefetch(req_id)
+                    self._revoke_pending_prefetch(req_id, reason="aborted")
                     continue
 
                 alloc_len = operation.storage_hit_count
@@ -1569,8 +1621,23 @@ class UnifiedRadixCache(BasePrefixCache):
                     if alloc_len >= self.prefetch_threshold:
                         host_indices = cc.mem_pool_host.alloc(alloc_len)
                 if host_indices is None:
-                    self._revoke_pending_prefetch(req_id)
+                    logger.warning(
+                        "HiCache prefetch host_alloc_failed req=%s exist_hit=%d host_available=%d",
+                        req_id,
+                        operation.exist_hit_count,
+                        cc.mem_pool_host.available_size(),
+                    )
+                    self._revoke_pending_prefetch(req_id, reason="host_alloc_failed")
                     continue
+                if alloc_len < operation.exist_hit_count:
+                    # Host memory pressure: only a prefix of the L3 hits got
+                    # host memory; the rest will not be fetched.
+                    logger.info(
+                        "HiCache prefetch partial_host_alloc req=%s exist_hit=%d allocated=%d",
+                        req_id,
+                        operation.exist_hit_count,
+                        alloc_len,
+                    )
 
                 operation.storage_hit_count = alloc_len
                 operation.hash_value = operation.hash_value[
