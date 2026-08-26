@@ -1743,6 +1743,11 @@ class HiRadixCache(RadixCache):
         new_input_tokens: List[int],
         last_hash: Optional[str] = None,
         prefix_keys: Optional[List[str]] = None,
+        # Request-level context accepted for signature parity with
+        # UnifiedRadixCache; not used by HiRadixCache.
+        total_input_tokens: int = 0,
+        l1_matched_tokens: int = 0,
+        l2_matched_tokens: int = 0,
     ):
         prefetch_key = RadixKey(
             new_input_tokens,

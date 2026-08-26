@@ -203,6 +203,13 @@ class PrefetchOperation(StorageOperation):
         self._lock = threading.Lock()
         self._terminated_flag = False
         self.storage_hit_count = 0
+        # Tokens confirmed present in L3 by the exist query (min across prefetch
+        # sync groups), recorded before any host-memory-pressure clamping.
+        self.exist_hit_count = 0
+        # Request-level context recorded at prefetch issue time, for logging.
+        self.total_input_tokens = 0
+        self.l1_matched_tokens = 0
+        self.l2_matched_tokens = 0
         self.start_time = time.monotonic()
 
         super().__init__(None, token_ids, last_hash, prefix_keys=prefix_keys)
@@ -1074,7 +1081,12 @@ class HiCacheController:
                     # not to prefetch if not enough benefits
                     self.prefetch_revoke_queue.put(operation.request_id)
                     logger.debug(
-                        f"Revoking prefetch for request {operation.request_id} due to insufficient hits ({storage_hit_count})."
+                        "Revoking prefetch for req=%s due to insufficient L3 hits "
+                        "(exist_hit=%d < threshold=%d); the revoke is logged by the "
+                        "scheduler thread draining prefetch_revoke_queue.",
+                        operation.request_id,
+                        storage_hit_count,
+                        self.prefetch_threshold,
                     )
                 else:
                     # Record hit count, so the scheduler thread will know the exact memory to allocate
@@ -1082,6 +1094,7 @@ class HiCacheController:
                         : (storage_hit_count // self.page_size)
                     ]
                     operation.storage_hit_count = storage_hit_count
+                    operation.exist_hit_count = storage_hit_count
                     self.prefetch_hit_queue.put(operation)
 
             except Empty:
