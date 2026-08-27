@@ -139,6 +139,10 @@ class PrefetchOperation(StorageOperation):
         self.l1_matched_tokens = 0
         self.l2_matched_tokens = 0
         self.start_time = time.monotonic()
+        # L3 transfer metrics populated by storage backend.
+        self.exist_query_ms = 0.0
+        self.fetch_ms = 0.0
+        self.fetched_bytes = 0
         super().__init__(
             None,
             token_ids,
@@ -614,6 +618,7 @@ class HybridCacheController(BaseHiCacheController):
         extra_info = HiCacheStorageExtraInfo(
             prefix_keys=operation.prefix_keys.copy() if operation.prefix_keys else None
         )
+        t0 = time.monotonic()
         if operation.pool_transfers:
             hit_result = self.storage_backend.batch_exists_v2(
                 hash_value, operation.pool_transfers, extra_info
@@ -623,6 +628,7 @@ class HybridCacheController(BaseHiCacheController):
             hit_result = PoolTransferResult(
                 kv_hit_pages=kv_hit_count, extra_pool_hit_pages={}
             )
+        operation.exist_query_ms = (time.monotonic() - t0) * 1000
 
         kv_hit_pages = hit_result.kv_hit_pages
         operation.pool_storage_result.update_kv_hit_pages(kv_hit_pages)
@@ -662,6 +668,7 @@ class HybridCacheController(BaseHiCacheController):
 
     def _page_transfer(self, operation):
         # KV pools first — determines actual completed page count
+        t0 = time.monotonic()
         super()._page_transfer(operation)
 
         # Extra pools only after KV fully completes. If KV terminated early
@@ -677,9 +684,12 @@ class HybridCacheController(BaseHiCacheController):
                 operation.pool_transfers, operation.hash_value, kv_completed_pages
             )
             self._resolve_sidecar_derived_pool_transfers(operation)
-            results = self.storage_backend.batch_get_v2(operation.pool_transfers)
+            extra_info = HiCacheStorageExtraInfo()
+            results = self.storage_backend.batch_get_v2(operation.pool_transfers, extra_info)
+            operation.fetched_bytes += extra_info.fetched_bytes
             operation.pool_storage_result.update_extra_pool_hit_pages(results)
         operation.pool_transfers_done = True
+        operation.fetch_ms = (time.monotonic() - t0) * 1000
 
     def _page_backup(self, operation):
         # MLA KV is replicated across TP ranks and should still be written only

@@ -1403,7 +1403,8 @@ class UnifiedRadixCache(BasePrefixCache):
             terminate_reason = "interrupted"
         logger.info(
             "HiCache prefetch %s req=%s completed_local=%d completed_synced=%d matched=%d loaded=%d released=%d occupied=%d "
-            "total_input=%d l1_matched=%d l2_matched=%d prefetch_tokens=%d exist_hit=%d host_alloc=%d reason=%s",
+            "total_input=%d l1_matched=%d l2_matched=%d prefetch_tokens=%d exist_hit=%d host_alloc=%d reason=%s "
+            "l3_bytes_mb=%.1f duration_ms=%.0f exist_ms=%.0f fetch_ms=%.0f",
             "dropped" if insert_result.host_insert_dropped else "success",
             req_id,
             completed_tokens,
@@ -1419,6 +1420,10 @@ class UnifiedRadixCache(BasePrefixCache):
             operation.exist_hit_count,
             operation.storage_hit_count,
             terminate_reason,
+            operation.fetched_bytes / (1024 * 1024),
+            (time.monotonic() - operation.start_time) * 1000,
+            operation.exist_query_ms,
+            operation.fetch_ms,
         )
         if self.enable_storage_metrics and self.storage_metrics_collector is not None:
             self.storage_metrics_collector.log_prefetched_tokens(loaded_from_storage)

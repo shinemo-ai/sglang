@@ -211,6 +211,10 @@ class PrefetchOperation(StorageOperation):
         self.l1_matched_tokens = 0
         self.l2_matched_tokens = 0
         self.start_time = time.monotonic()
+        # L3 transfer metrics populated by storage backend.
+        self.exist_query_ms = 0.0
+        self.fetch_ms = 0.0
+        self.fetched_bytes = 0
 
         super().__init__(None, token_ids, last_hash, prefix_keys=prefix_keys)
 
@@ -973,6 +977,7 @@ class HiCacheController:
     def _page_transfer(self, operation):
         # Transfer batch by batch
         prefix_keys = operation.prefix_keys
+        t0 = time.monotonic()
         for i in range(0, len(operation.hash_value), STORAGE_BATCH_SIZE):
             batch_hashes = operation.hash_value[i : i + STORAGE_BATCH_SIZE]
             batch_host_indices = operation.host_indices[
@@ -989,6 +994,7 @@ class HiCacheController:
             # Get one batch token, and update the completed_tokens if succeed
             extra_info = HiCacheStorageExtraInfo(prefix_keys=prefix_keys)
             self.page_get_func(operation, batch_hashes, batch_host_indices, extra_info)
+            operation.fetched_bytes += extra_info.fetched_bytes
             # Check termination
             if (
                 operation.completed_tokens
@@ -999,6 +1005,7 @@ class HiCacheController:
 
             if prefix_keys and len(prefix_keys) > 0:
                 prefix_keys += batch_hashes
+        operation.fetch_ms = (time.monotonic() - t0) * 1000
 
     def prefetch_io_aux_func(self):
         """
@@ -1038,6 +1045,7 @@ class HiCacheController:
             tokens_to_fetch, last_hash, page_size=self.page_size
         )
 
+        t0 = time.monotonic()
         for start in range(0, len(page_hashes), STORAGE_BATCH_SIZE):
             batch_hashes = page_hashes[start : start + STORAGE_BATCH_SIZE]
             extra_info = HiCacheStorageExtraInfo(prefix_keys=prefix_keys)
@@ -1048,6 +1056,7 @@ class HiCacheController:
                 break
             if prefix_keys and len(prefix_keys) > 0:
                 prefix_keys += batch_hashes
+        operation.exist_query_ms = (time.monotonic() - t0) * 1000
 
         return hash_value, storage_query_count
 

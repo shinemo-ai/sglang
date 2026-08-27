@@ -44,6 +44,7 @@ class HiCacheStorageConfig:
 class HiCacheStorageExtraInfo:
     prefix_keys: Optional[List[str]] = None
     extra_info: Optional[dict] = None
+    fetched_bytes: int = 0
 
 
 @dataclass(frozen=True)
