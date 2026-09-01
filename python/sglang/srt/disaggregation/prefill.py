@@ -411,8 +411,8 @@ class PrefillBootstrapQueue:
                     if local_poll == KVPoll.Failed:
                         polls[i] = KVPoll.Failed
         else:
-            tp_group = self.schedule.attn_tp_cpu_group
-            cp_group = self.schedule.attn_cp_cpu_group
+            tp_group = self.scheduler.attn_tp_cpu_group
+            cp_group = self.scheduler.attn_cp_cpu_group
 
             def _empty():
                 return [] if not return_failed_reqs else ([], [])
