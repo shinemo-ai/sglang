@@ -143,6 +143,13 @@ class PrefetchOperation(StorageOperation):
         self.exist_query_ms = 0.0
         self.fetch_ms = 0.0
         self.fetched_bytes = 0
+        # Queue-wait attribution; see PrefetchOperation in cache_controller.
+        self.prefetch_queue_size = 0  # backlog in prefetch_queue at submit time
+        self.queue_wait_ms = 0.0  # time in prefetch_queue before the query thread pops it
+        self.query_done_time = 0.0  # after exist query + all-reduce barrier
+        self.prefetch_buffer_size = 0  # backlog in prefetch_buffer at transfer-enqueue time
+        self.transfer_enqueued_time = 0.0  # when the scheduler put it into prefetch_buffer
+        self.buffer_wait_ms = 0.0  # time in prefetch_buffer before the io thread pops it
         super().__init__(
             None,
             token_ids,
@@ -589,6 +596,7 @@ class HybridCacheController(BaseHiCacheController):
             prefix_keys=prefix_keys,
             pool_transfers=extra_pools,
         )
+        operation.prefetch_queue_size = self.prefetch_queue.qsize()
         self.prefetch_queue.put(operation)
         return operation
 

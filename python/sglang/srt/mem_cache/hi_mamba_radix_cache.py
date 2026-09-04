@@ -1569,6 +1569,8 @@ class HiMambaRadixCache(MambaRadixCache):
                     host_indices,
                     op,
                 )
+                operation.prefetch_buffer_size = cc.prefetch_buffer.qsize()
+                operation.transfer_enqueued_time = time.monotonic()
                 cc.prefetch_buffer.put(operation)
 
         def _drain_backup():

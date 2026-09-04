@@ -215,6 +215,19 @@ class PrefetchOperation(StorageOperation):
         self.exist_query_ms = 0.0
         self.fetch_ms = 0.0
         self.fetched_bytes = 0
+        # Queue-wait attribution: the prefetch path spans three queues (prefetch
+        # _queue -> prefetch_hit_queue -> prefetch_buffer) drained by different
+        # threads, so exist_ms/fetch_ms alone miss the time an operation spends
+        # blocked on its serial workers. Timestamps are monotonic() values;
+        # *_wait_ms are computed at the moment the next stage picks the
+        # operation up. transfer_enqueued_time stays 0 if the operation was
+        # revoked before any host allocation.
+        self.prefetch_queue_size = 0  # backlog in prefetch_queue at submit time
+        self.queue_wait_ms = 0.0  # time in prefetch_queue before the query thread pops it
+        self.query_done_time = 0.0  # after exist query + all-reduce barrier
+        self.prefetch_buffer_size = 0  # backlog in prefetch_buffer at transfer-enqueue time
+        self.transfer_enqueued_time = 0.0  # when the scheduler put it into prefetch_buffer
+        self.buffer_wait_ms = 0.0  # time in prefetch_buffer before the io thread pops it
 
         super().__init__(None, token_ids, last_hash, prefix_keys=prefix_keys)
 
@@ -921,6 +934,7 @@ class HiCacheController:
         operation = PrefetchOperation(
             request_id, new_input_tokens, last_hash, prefix_keys
         )
+        operation.prefetch_queue_size = self.prefetch_queue.qsize()
         self.prefetch_queue.put(operation)
         return operation
 
@@ -1016,6 +1030,9 @@ class HiCacheController:
                 operation = self.prefetch_buffer.get(block=True, timeout=1)
                 if operation is None:
                     continue
+                operation.buffer_wait_ms = (
+                    time.monotonic() - operation.transfer_enqueued_time
+                ) * 1000
                 self._page_transfer(operation)
                 # operation terminated by controller, release pre-allocated memory
                 self.append_host_mem_release(
@@ -1074,6 +1091,9 @@ class HiCacheController:
                 operation = self.prefetch_queue.get(block=True, timeout=1)
                 if operation is None:
                     continue
+                operation.queue_wait_ms = (
+                    time.monotonic() - operation.start_time
+                ) * 1000
                 if operation.is_terminated():
                     hash_value, storage_hit_count = [], 0
                 else:
@@ -1084,6 +1104,7 @@ class HiCacheController:
                 self._all_reduce_prefetch_groups(
                     storage_hit_count_tensor, torch.distributed.ReduceOp.MIN
                 )
+                operation.query_done_time = time.monotonic()
                 storage_hit_count = storage_hit_count_tensor.item()
 
                 if storage_hit_count < self.prefetch_threshold:

@@ -1401,10 +1401,18 @@ class UnifiedRadixCache(BasePrefixCache):
             terminate_reason = "timeout"
         else:
             terminate_reason = "interrupted"
+        # duration_ms = queue_ms + exist_ms + barrier + alloc_wait_ms +
+        # buffer_ms + fetch_ms + commit tail (scheduler step latency after the
+        # io thread finished). The all-reduce barrier wait is the implicit
+        # residual; see PrefetchOperation field docs in cache_controller.
+        alloc_wait_ms = (
+            operation.transfer_enqueued_time - operation.query_done_time
+        ) * 1000
         logger.info(
             "HiCache prefetch %s req=%s completed_local=%d completed_synced=%d matched=%d loaded=%d released=%d occupied=%d "
             "total_input=%d l1_matched=%d l2_matched=%d prefetch_tokens=%d exist_hit=%d host_alloc=%d reason=%s "
-            "l3_bytes_mb=%.1f duration_ms=%.0f exist_ms=%.0f fetch_ms=%.0f",
+            "l3_bytes_mb=%.1f duration_ms=%.0f exist_ms=%.0f fetch_ms=%.0f "
+            "queue_ms=%.0f alloc_wait_ms=%.0f buffer_ms=%.0f pq_size=%d pb_size=%d",
             "dropped" if insert_result.host_insert_dropped else "success",
             req_id,
             completed_tokens,
@@ -1424,6 +1432,11 @@ class UnifiedRadixCache(BasePrefixCache):
             (time.monotonic() - operation.start_time) * 1000,
             operation.exist_query_ms,
             operation.fetch_ms,
+            operation.queue_wait_ms,
+            alloc_wait_ms,
+            operation.buffer_wait_ms,
+            operation.prefetch_queue_size,
+            operation.prefetch_buffer_size,
         )
         if self.enable_storage_metrics and self.storage_metrics_collector is not None:
             self.storage_metrics_collector.log_prefetched_tokens(loaded_from_storage)
@@ -1650,6 +1663,8 @@ class UnifiedRadixCache(BasePrefixCache):
                 ]
                 operation.host_indices = host_indices
                 self.ongoing_prefetch[req_id] = info._replace(host_indices=host_indices)
+                operation.prefetch_buffer_size = cc.prefetch_buffer.qsize()
+                operation.transfer_enqueued_time = time.monotonic()
                 cc.prefetch_buffer.put(operation)
 
         def _drain_backup():

@@ -655,6 +655,8 @@ class HiRadixCache(RadixCache):
                     : alloc_len // self.page_size
                 ]
                 operation.host_indices = host_indices
+                operation.prefetch_buffer_size = cc.prefetch_buffer.qsize()
+                operation.transfer_enqueued_time = time.monotonic()
                 cc.prefetch_buffer.put(operation)
 
         def _drain_backup():
