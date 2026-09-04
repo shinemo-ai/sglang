@@ -1569,6 +1569,8 @@ class HiMambaRadixCache(MambaRadixCache):
                     host_indices,
                     op,
                 )
+                operation.prefetch_buffer_size = cc.prefetch_buffer.qsize()
+                operation.transfer_enqueued_time = time.monotonic()
                 cc.prefetch_buffer.put(operation)
 
         def _drain_backup():
@@ -1803,6 +1805,11 @@ class HiMambaRadixCache(MambaRadixCache):
         new_input_tokens: List[int],
         last_hash: Optional[str] = None,
         prefix_keys: Optional[List[str]] = None,
+        # Request-level context accepted for signature parity with
+        # UnifiedRadixCache; not used by HiMambaRadixCache.
+        total_input_tokens: int = 0,
+        l1_matched_tokens: int = 0,
+        l2_matched_tokens: int = 0,
     ):
         prefetch_length = len(new_input_tokens) - (
             len(new_input_tokens) % self.page_size
