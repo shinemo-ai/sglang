@@ -1654,6 +1654,9 @@ class HiRadixCache(RadixCache):
 
         if self.enable_storage_metrics:
             self.storage_metrics_collector.log_prefetched_tokens(loaded_from_storage)
+            self.storage_metrics_collector.log_prefetch_transfer(
+                operation.fetched_bytes, operation.fetch_ms
+            )
 
         return True
 

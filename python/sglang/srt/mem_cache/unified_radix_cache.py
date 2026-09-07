@@ -1440,6 +1440,9 @@ class UnifiedRadixCache(BasePrefixCache):
         )
         if self.enable_storage_metrics and self.storage_metrics_collector is not None:
             self.storage_metrics_collector.log_prefetched_tokens(loaded_from_storage)
+            self.storage_metrics_collector.log_prefetch_transfer(
+                operation.fetched_bytes, operation.fetch_ms
+            )
         return True
 
     def _sync_and_check_hybrid_prefetch_result(
