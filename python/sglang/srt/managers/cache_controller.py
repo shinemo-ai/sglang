@@ -203,7 +203,31 @@ class PrefetchOperation(StorageOperation):
         self._lock = threading.Lock()
         self._terminated_flag = False
         self.storage_hit_count = 0
+        # Tokens confirmed present in L3 by the exist query (min across prefetch
+        # sync groups), recorded before any host-memory-pressure clamping.
+        self.exist_hit_count = 0
+        # Request-level context recorded at prefetch issue time, for logging.
+        self.total_input_tokens = 0
+        self.l1_matched_tokens = 0
+        self.l2_matched_tokens = 0
         self.start_time = time.monotonic()
+        # L3 transfer metrics populated by storage backend.
+        self.exist_query_ms = 0.0
+        self.fetch_ms = 0.0
+        self.fetched_bytes = 0
+        # Queue-wait attribution: the prefetch path spans three queues (prefetch
+        # _queue -> prefetch_hit_queue -> prefetch_buffer) drained by different
+        # threads, so exist_ms/fetch_ms alone miss the time an operation spends
+        # blocked on its serial workers. Timestamps are monotonic() values;
+        # *_wait_ms are computed at the moment the next stage picks the
+        # operation up. transfer_enqueued_time stays 0 if the operation was
+        # revoked before any host allocation.
+        self.prefetch_queue_size = 0  # backlog in prefetch_queue at submit time
+        self.queue_wait_ms = 0.0  # time in prefetch_queue before the query thread pops it
+        self.query_done_time = 0.0  # after exist query + all-reduce barrier
+        self.prefetch_buffer_size = 0  # backlog in prefetch_buffer at transfer-enqueue time
+        self.transfer_enqueued_time = 0.0  # when the scheduler put it into prefetch_buffer
+        self.buffer_wait_ms = 0.0  # time in prefetch_buffer before the io thread pops it
 
         super().__init__(None, token_ids, last_hash, prefix_keys=prefix_keys)
 
@@ -910,6 +934,7 @@ class HiCacheController:
         operation = PrefetchOperation(
             request_id, new_input_tokens, last_hash, prefix_keys
         )
+        operation.prefetch_queue_size = self.prefetch_queue.qsize()
         self.prefetch_queue.put(operation)
         return operation
 
@@ -966,6 +991,7 @@ class HiCacheController:
     def _page_transfer(self, operation):
         # Transfer batch by batch
         prefix_keys = operation.prefix_keys
+        t0 = time.monotonic()
         for i in range(0, len(operation.hash_value), STORAGE_BATCH_SIZE):
             batch_hashes = operation.hash_value[i : i + STORAGE_BATCH_SIZE]
             batch_host_indices = operation.host_indices[
@@ -982,6 +1008,7 @@ class HiCacheController:
             # Get one batch token, and update the completed_tokens if succeed
             extra_info = HiCacheStorageExtraInfo(prefix_keys=prefix_keys)
             self.page_get_func(operation, batch_hashes, batch_host_indices, extra_info)
+            operation.fetched_bytes += extra_info.fetched_bytes
             # Check termination
             if (
                 operation.completed_tokens
@@ -992,6 +1019,7 @@ class HiCacheController:
 
             if prefix_keys and len(prefix_keys) > 0:
                 prefix_keys += batch_hashes
+        operation.fetch_ms = (time.monotonic() - t0) * 1000
 
     def prefetch_io_aux_func(self):
         """
@@ -1002,6 +1030,9 @@ class HiCacheController:
                 operation = self.prefetch_buffer.get(block=True, timeout=1)
                 if operation is None:
                     continue
+                operation.buffer_wait_ms = (
+                    time.monotonic() - operation.transfer_enqueued_time
+                ) * 1000
                 self._page_transfer(operation)
                 # operation terminated by controller, release pre-allocated memory
                 self.append_host_mem_release(
@@ -1031,6 +1062,7 @@ class HiCacheController:
             tokens_to_fetch, last_hash, page_size=self.page_size
         )
 
+        t0 = time.monotonic()
         for start in range(0, len(page_hashes), STORAGE_BATCH_SIZE):
             batch_hashes = page_hashes[start : start + STORAGE_BATCH_SIZE]
             extra_info = HiCacheStorageExtraInfo(prefix_keys=prefix_keys)
@@ -1041,6 +1073,7 @@ class HiCacheController:
                 break
             if prefix_keys and len(prefix_keys) > 0:
                 prefix_keys += batch_hashes
+        operation.exist_query_ms = (time.monotonic() - t0) * 1000
 
         return hash_value, storage_query_count
 
@@ -1058,6 +1091,9 @@ class HiCacheController:
                 operation = self.prefetch_queue.get(block=True, timeout=1)
                 if operation is None:
                     continue
+                operation.queue_wait_ms = (
+                    time.monotonic() - operation.start_time
+                ) * 1000
                 if operation.is_terminated():
                     hash_value, storage_hit_count = [], 0
                 else:
@@ -1068,13 +1104,19 @@ class HiCacheController:
                 self._all_reduce_prefetch_groups(
                     storage_hit_count_tensor, torch.distributed.ReduceOp.MIN
                 )
+                operation.query_done_time = time.monotonic()
                 storage_hit_count = storage_hit_count_tensor.item()
 
                 if storage_hit_count < self.prefetch_threshold:
                     # not to prefetch if not enough benefits
                     self.prefetch_revoke_queue.put(operation.request_id)
                     logger.debug(
-                        f"Revoking prefetch for request {operation.request_id} due to insufficient hits ({storage_hit_count})."
+                        "Revoking prefetch for req=%s due to insufficient L3 hits "
+                        "(exist_hit=%d < threshold=%d); the revoke is logged by the "
+                        "scheduler thread draining prefetch_revoke_queue.",
+                        operation.request_id,
+                        storage_hit_count,
+                        self.prefetch_threshold,
                     )
                 else:
                     # Record hit count, so the scheduler thread will know the exact memory to allocate
@@ -1082,6 +1124,7 @@ class HiCacheController:
                         : (storage_hit_count // self.page_size)
                     ]
                     operation.storage_hit_count = storage_hit_count
+                    operation.exist_hit_count = storage_hit_count
                     self.prefetch_hit_queue.put(operation)
 
             except Empty:

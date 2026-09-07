@@ -131,7 +131,25 @@ class PrefetchOperation(StorageOperation):
         self._lock = threading.Lock()
         self._terminated_flag = False
         self.storage_hit_count = 0
+        # Tokens confirmed present in L3 by the exist query (min across prefetch
+        # sync groups), recorded before any host-memory-pressure clamping.
+        self.exist_hit_count = 0
+        # Request-level context recorded at prefetch issue time, for logging.
+        self.total_input_tokens = 0
+        self.l1_matched_tokens = 0
+        self.l2_matched_tokens = 0
         self.start_time = time.monotonic()
+        # L3 transfer metrics populated by storage backend.
+        self.exist_query_ms = 0.0
+        self.fetch_ms = 0.0
+        self.fetched_bytes = 0
+        # Queue-wait attribution; see PrefetchOperation in cache_controller.
+        self.prefetch_queue_size = 0  # backlog in prefetch_queue at submit time
+        self.queue_wait_ms = 0.0  # time in prefetch_queue before the query thread pops it
+        self.query_done_time = 0.0  # after exist query + all-reduce barrier
+        self.prefetch_buffer_size = 0  # backlog in prefetch_buffer at transfer-enqueue time
+        self.transfer_enqueued_time = 0.0  # when the scheduler put it into prefetch_buffer
+        self.buffer_wait_ms = 0.0  # time in prefetch_buffer before the io thread pops it
         super().__init__(
             None,
             token_ids,
@@ -578,6 +596,7 @@ class HybridCacheController(BaseHiCacheController):
             prefix_keys=prefix_keys,
             pool_transfers=extra_pools,
         )
+        operation.prefetch_queue_size = self.prefetch_queue.qsize()
         self.prefetch_queue.put(operation)
         return operation
 
@@ -607,6 +626,7 @@ class HybridCacheController(BaseHiCacheController):
         extra_info = HiCacheStorageExtraInfo(
             prefix_keys=operation.prefix_keys.copy() if operation.prefix_keys else None
         )
+        t0 = time.monotonic()
         if operation.pool_transfers:
             hit_result = self.storage_backend.batch_exists_v2(
                 hash_value, operation.pool_transfers, extra_info
@@ -616,6 +636,7 @@ class HybridCacheController(BaseHiCacheController):
             hit_result = PoolTransferResult(
                 kv_hit_pages=kv_hit_count, extra_pool_hit_pages={}
             )
+        operation.exist_query_ms = (time.monotonic() - t0) * 1000
 
         kv_hit_pages = hit_result.kv_hit_pages
         operation.pool_storage_result.update_kv_hit_pages(kv_hit_pages)
@@ -655,6 +676,7 @@ class HybridCacheController(BaseHiCacheController):
 
     def _page_transfer(self, operation):
         # KV pools first — determines actual completed page count
+        t0 = time.monotonic()
         super()._page_transfer(operation)
 
         # Extra pools only after KV fully completes. If KV terminated early
@@ -670,9 +692,12 @@ class HybridCacheController(BaseHiCacheController):
                 operation.pool_transfers, operation.hash_value, kv_completed_pages
             )
             self._resolve_sidecar_derived_pool_transfers(operation)
-            results = self.storage_backend.batch_get_v2(operation.pool_transfers)
+            extra_info = HiCacheStorageExtraInfo()
+            results = self.storage_backend.batch_get_v2(operation.pool_transfers, extra_info)
+            operation.fetched_bytes += extra_info.fetched_bytes
             operation.pool_storage_result.update_extra_pool_hit_pages(results)
         operation.pool_transfers_done = True
+        operation.fetch_ms = (time.monotonic() - t0) * 1000
 
     def _page_backup(self, operation):
         # MLA KV is replicated across TP ranks and should still be written only

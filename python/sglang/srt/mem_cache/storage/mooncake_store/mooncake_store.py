@@ -860,7 +860,9 @@ class MooncakeStore(HiCacheStorage, MooncakeBaseStore):
 
         return PoolTransferResult(final_pages, hit_count)
 
-    def _batch_io_v2(self, transfers: List[PoolTransfer], is_set: bool):
+    def _batch_io_v2(
+        self, transfers: List[PoolTransfer], is_set: bool, extra_info: Optional[HiCacheStorageExtraInfo] = None
+    ):
         # Unified v2 I/O path: each PoolTransfer can expand to one or more
         # storage objects per logical page, but API still reports page-level result.
         results: dict = {}
@@ -905,6 +907,8 @@ class MooncakeStore(HiCacheStorage, MooncakeBaseStore):
                 io_results = self._get_batch_zero_copy_impl(
                     key_strs, ptr_list, element_size_list
                 )
+                if extra_info is not None:
+                    extra_info.fetched_bytes += sum(r for r in io_results if r > 0)
             results[transfer.name] = self._batch_postprocess(
                 io_results, is_set_operate=is_set, key_multiplier=key_multiplier
             )
@@ -915,7 +919,7 @@ class MooncakeStore(HiCacheStorage, MooncakeBaseStore):
         transfers: List[PoolTransfer],
         extra_info: Optional[HiCacheStorageExtraInfo] = None,
     ) -> dict:
-        return self._batch_io_v2(transfers, is_set=False)
+        return self._batch_io_v2(transfers, is_set=False, extra_info=extra_info)
 
     def batch_set_v2(
         self,
@@ -1047,6 +1051,9 @@ class MooncakeStore(HiCacheStorage, MooncakeBaseStore):
             key_strs, buffer_ptrs, buffer_sizes
         )
         end_time = time.perf_counter()
+
+        if extra_info is not None:
+            extra_info.fetched_bytes += sum(r for r in get_results if r > 0)
 
         if self.enable_storage_metrics:
             self.prefetch_pgs.append(len(keys))

@@ -1839,6 +1839,12 @@ class StorageMetricsCollector(_StatLoggerDIMixin):
             labelnames=labels.keys(),
         )
 
+        self.prefetched_bytes_total = Counter(
+            name="sglang:prefetched_bytes_total",
+            documentation="Number of bytes fetched from storage during prefetch.",
+            labelnames=labels.keys(),
+        )
+
         bucket_io = [
             1,
             5,
@@ -1878,6 +1884,13 @@ class StorageMetricsCollector(_StatLoggerDIMixin):
             buckets=bucket_bandwidth,
         )
 
+        self.histogram_prefetch_transfer_bandwidth = Histogram(
+            name="sglang:prefetch_transfer_bandwidth",
+            documentation="Histogram of prefetch transfer bandwidth in GB/s.",
+            labelnames=labels.keys(),
+            buckets=bucket_bandwidth,
+        )
+
         self.histogram_backup_bandwidth = Histogram(
             name="sglang:backup_bandwidth",
             documentation="Histogram of backup bandwidth in GB/s.",
@@ -1892,6 +1905,17 @@ class StorageMetricsCollector(_StatLoggerDIMixin):
     def log_backuped_tokens(self, backuped_tokens: int):
         if backuped_tokens > 0:
             self.backuped_tokens_total.labels(**self.labels).inc(backuped_tokens)
+
+    def log_prefetched_bytes(self, fetched_bytes: int):
+        if fetched_bytes > 0:
+            self.prefetched_bytes_total.labels(**self.labels).inc(fetched_bytes)
+
+    def log_prefetch_transfer(self, fetched_bytes: int, fetch_ms: float):
+        if fetched_bytes > 0 and fetch_ms > 0:
+            self.log_prefetched_bytes(fetched_bytes)
+            self.histogram_prefetch_transfer_bandwidth.labels(**self.labels).observe(
+                fetched_bytes / fetch_ms / 1e6
+            )
 
     def _log_histogram(self, histogram, data: Union[int, float]):
         histogram.labels(**self.labels).observe(data)
