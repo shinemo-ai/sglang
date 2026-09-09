@@ -430,6 +430,7 @@ class PrefillBootstrapQueue:
                     tp_group,
                 )
             else:
+                
                 def _empty():
                     return [] if not return_failed_reqs else ([], [])
 
