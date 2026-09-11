@@ -19,6 +19,7 @@ from sglang.srt.managers.scheduler import GenerationBatchResult
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,
+    ForwardBatch,
     compute_position,
 )
 from sglang.srt.runtime_context import get_exec, get_parallel, get_spec
@@ -415,10 +416,11 @@ class DSparkWorkerV2(BaseSpecWorker):
             return self._decode_idle_result(on_publish=on_publish)
 
         batch_output = self.target_worker.forward_batch_generation(
-            batch, capture_hidden_mode=CaptureHiddenMode.FULL
+            batch,
+            is_verify=True,
+            capture_hidden_mode=CaptureHiddenMode.FULL
         )
         logits_output = batch_output.logits_output
-        next_token_ids = batch_output.next_token_ids
         batch_output.new_seq_lens = batch.seq_lens
         if on_publish is not None:
             on_publish(batch_output.new_seq_lens)
@@ -437,7 +439,7 @@ class DSparkWorkerV2(BaseSpecWorker):
 
         # Must inject before prefill returns: the scheduler may update radix
         # afterward, invalidating out_cache_loc.
-        device = next_token_ids.device
+        device = batch.out_cache_loc.device
         ctx_lens = torch.tensor(batch.extend_lens, dtype=torch.int32, device=device)
         draft_seq_lens = torch.tensor(
             batch.prefix_lens, dtype=torch.int32, device=device
@@ -455,6 +457,26 @@ class DSparkWorkerV2(BaseSpecWorker):
         )
         # Avoid copying large hidden-state buffers to CPU in overlap scheduling.
         logits_output.hidden_states = None
+
+        forward_batch = ForwardBatch.init_new(
+            batch,
+            self.model_runner,
+            return_hidden_states_before_norm=False,
+        )
+        if not forward_batch.is_prefill_only:
+            next_token_ids = self.model_runner.sample(logits_output, forward_batch)
+        else:
+            next_token_ids = torch.zeros(
+                len(forward_batch.seq_lens),
+                dtype=torch.long,
+                device=forward_batch.input_ids.device,
+            )
+            if (
+                forward_batch.return_logprob
+                and logits_output.next_token_logits is not None
+            ):
+                self.model_runner.compute_logprobs_only(logits_output, forward_batch)
+        batch_output.next_token_ids = next_token_ids
 
         batch_output.next_draft_input = make_next_draft_input(
             bonus_tokens=next_token_ids,
